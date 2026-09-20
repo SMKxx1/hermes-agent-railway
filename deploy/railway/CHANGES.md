@@ -1,0 +1,36 @@
+# Railway distribution changes
+
+## Deployment and configuration
+
+- Added a default Docker entry point for source imports, a digest-pinned thin image, first-boot defaults, and an optional Railway TypeScript infrastructure recipe.
+- Added mandatory username/password + RFC 6238 TOTP dashboard authentication. Enrollment uses a locally generated QR code, an encrypted private factor store, one-time recovery codes, bounded challenges, replay protection, and owner-only shell recovery.
+- Railway credentials are held in a protected managed overlay. Changing or removing a variable cannot revive its old copy in the volume's `.env`. Instance-generated secrets remain stable on the persistent volume.
+- Removed the custom model orchestrator, its virtual provider and runtime routing, route research, dashboard editor, and API endpoints. Native Hermes tool delegation remains available.
+- Removed private deployment notes, contributor contact mappings, unrelated benchmark artifacts, and inherited publishing workflows. Retained the upstream MIT license. CI checks source and Docker behavior without publishing anything.
+
+## Bugs fixed
+
+- A fresh image could not seed `.env` because both the derivative and pinned base excluded `.env.example`; the internal API key was consequently never generated. Bootstrap now creates a safe instance file explicitly.
+- Dashboard availability depended on undocumented environment settings. The image now supplies port and dashboard defaults.
+- Stored dotenv credentials overrode Railway rotations. The managed overlay now makes Railway-owned variables authoritative, including removals.
+- Managed credential parsing interpreted literal dollar expressions differently between the runtime and settings layer. Both now share one dotenv parser with interpolation disabled.
+- Docker config migration failures were logged and ignored. Startup now fails before application services when migration fails.
+- Credential files created by a root shell could become unreadable to the supervised user. Startup repairs ownership and private permissions for the supported credential files and TOTP database.
+- Telegram/WhatsApp audio handling now passes speech audio to transcription while retaining non-speech audio as attachments. Qwen transcription and its no-fallback behavior are preserved.
+
+## Performance and maintenance
+
+- Dashboard compilation is cached independently of backend-only changes.
+- Dependency manifests are checked against the pinned base, so dependency drift fails the build instead of producing a subtly incompatible image.
+- Managed dotenv loading reuses the existing parsed-file cache, avoiding repeated parsing and writes.
+- Password hashing and authentication database operations run outside the async request event loop. SQLite connections close explicitly, and concurrent first-time factor initialization is serialized.
+
+## Supported scope and known limits
+
+This is a single-owner dashboard deployment with one replica and one persistent volume. It is not a multi-user hosted service. Sessions, memories, workspace data, factor state, and generated secrets belong to the individual deployment. Authenticator codes use the standard six-digit, 30-second format with a small clock tolerance.
+
+Keep the signing/encryption secret stable and back it up with the private volume. Changing that secret makes previously encrypted TOTP state unreadable and fails authentication closed; restore the matching secret instead of deleting state blindly. Changing the username/password revokes existing sessions. Logout revokes all sessions for the one configured owner.
+
+Local tests use disposable Docker volumes and synthetic credentials. Railway cloud provisioning, GitHub Actions execution, paid model calls, and real messaging integrations require verification in the new owner's environment. No public Railway template or prebuilt derivative image is published by this source tree.
+
+A broader state regression run identified an existing FTS query-shape assertion failure in `tests/test_hermes_state.py`; the affected `hermes_state.py` is identical to the pinned source baseline. That unrelated test was not changed or disabled.

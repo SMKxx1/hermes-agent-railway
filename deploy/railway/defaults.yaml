@@ -1,0 +1,16 @@
+# Shared first-boot defaults. Existing config.yaml is never overwritten.
+_config_version: 34
+model:
+  provider: openrouter
+  default: openai/gpt-5.4-mini
+  base_url: https://openrouter.ai/api/v1
+terminal:
+  backend: local
+  cwd: /opt/data/workspace
+dashboard:
+  theme: system
+platforms:
+  api_server:
+    enabled: true
+    extra:
+      host: 127.0.0.1
