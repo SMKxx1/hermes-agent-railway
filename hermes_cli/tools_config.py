@@ -4068,9 +4068,19 @@ def _configure_videogen_model_for_plugin(plugin_name: str, config: dict) -> None
 STT_MODEL_CATALOG = {
     "local": ["base", "tiny", "small", "medium", "large-v3"],
     "groq": ["whisper-large-v3-turbo", "whisper-large-v3", "distil-whisper-large-v3-en"],
-    "openai": ["whisper-1", "gpt-4o-mini-transcribe", "gpt-4o-transcribe", "gpt-transcribe"],
+    "openai": [
+        "whisper-1",
+        "gpt-4o-mini-transcribe",
+        "gpt-4o-transcribe",
+        "gpt-transcribe",
+        "qwen/qwen3-asr-1.7b",
+    ],
     "elevenlabs": ["scribe_v2", "scribe_v1"],
 }
+
+_OPENROUTER_QWEN_ASR_MODEL = "qwen/qwen3-asr-1.7b"
+_OPENROUTER_STT_BASE_URL = "https://openrouter.ai/api/v1"
+_OPENROUTER_API_KEY_REF = "${OPENROUTER_API_KEY}"
 
 # ElevenLabs historically uses ``model_id`` instead of ``model``.
 _STT_MODEL_CONFIG_KEY = {"elevenlabs": "model_id"}
@@ -4095,11 +4105,25 @@ def _configure_stt_model(stt_provider: str, config: dict) -> None:
         stt_cfg[stt_provider] = prov_cfg
     model_key = _STT_MODEL_CONFIG_KEY.get(stt_provider, "model")
     current = str(prov_cfg.get(model_key) or "").strip()
+    current_base_url = str(prov_cfg.get("base_url") or "").strip().rstrip("/")
+    was_qwen_openrouter = (
+        stt_provider == "openai"
+        and current == _OPENROUTER_QWEN_ASR_MODEL
+        and current_base_url == _OPENROUTER_STT_BASE_URL
+    )
     ordered = list(catalog)
     default_idx = ordered.index(current) if current in ordered else 0
     idx = _prompt_choice("  Select STT model:", ordered, default_idx)
     chosen = ordered[idx]
     prov_cfg[model_key] = chosen
+    if stt_provider == "openai" and chosen == _OPENROUTER_QWEN_ASR_MODEL:
+        prov_cfg["base_url"] = _OPENROUTER_STT_BASE_URL
+        prov_cfg["api_key"] = _OPENROUTER_API_KEY_REF
+    elif stt_provider == "openai":
+        if current_base_url == _OPENROUTER_STT_BASE_URL:
+            prov_cfg.pop("base_url", None)
+        if was_qwen_openrouter or prov_cfg.get("api_key") == _OPENROUTER_API_KEY_REF:
+            prov_cfg.pop("api_key", None)
     _print_success(f"  STT model set to: {chosen}")
 
 

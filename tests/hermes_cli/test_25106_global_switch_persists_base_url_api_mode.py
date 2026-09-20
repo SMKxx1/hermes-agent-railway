@@ -126,7 +126,3 @@ def _run_apply(monkeypatch, result, persist_global=True):
     monkeypatch.setattr(cli_mod, "save_config_value", _fake_save)
     cli_mod.HermesCLI._apply_model_switch_result(_StubCLI(), result, persist_global)
     return saved
-
-
-
-

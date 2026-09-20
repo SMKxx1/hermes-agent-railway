@@ -178,14 +178,13 @@ def apply_managed_overlay(config: dict) -> dict:
 
 
 def _parse_env(f) -> Dict[str, str]:
-    out: Dict[str, str] = {}
-    for line in f:
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        out[key.strip()] = value.strip().strip("\"'")
-    return out
+    # Operator-supplied secrets are literals. Expanding ${...} in a password
+    # changes the credential and makes Railway rotation unpredictable. Use the
+    # same parser for the UI's managed-key inventory and runtime loading.
+    from dotenv import dotenv_values
+
+    return {key: value for key, value in dotenv_values(stream=f, interpolate=False).items()
+            if value is not None}
 
 
 def _flatten_keys(d: dict, prefix: str = "") -> set:

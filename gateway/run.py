@@ -2793,8 +2793,18 @@ def _event_media_is_audio(event, index: int) -> bool:
 def _event_media_is_stt_input(event, index: int) -> bool:
     """True when an audio attachment should enter the automatic STT pipeline."""
     message_type = getattr(event, "message_type", None)
-    if message_type in {MessageType.AUDIO, MessageType.DOCUMENT}:
+    if message_type == MessageType.DOCUMENT:
         return False
+    # Telegram and WhatsApp expose voice notes and regular audio files as
+    # different message types, but both are user speech inputs for Hermes.
+    # Other platforms retain their existing AUDIO attachment semantics.
+    if message_type == MessageType.AUDIO:
+        source = getattr(event, "source", None)
+        return (
+            getattr(source, "platform", None)
+            in {Platform.TELEGRAM, Platform.WHATSAPP}
+            and _event_media_type_at(event, index).startswith("audio/")
+        )
     return (
         message_type == MessageType.VOICE
         or _event_media_type_at(event, index).startswith("audio/")
@@ -16743,12 +16753,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # mis-routed here as an image and the provider 400s.
                 if _event_media_is_image(event, i):
                     image_paths.append(path)
-                # MessageType.AUDIO = audio file attachment (e.g. .mp3, .m4a) — never STT
-                # MessageType.VOICE = voice message (Opus/OGG) — always STT
-                if event.message_type == MessageType.AUDIO:
-                    audio_file_paths.append(path)
-                elif not _pending_stt_prepared and _event_media_is_stt_input(event, i):
+                if not _pending_stt_prepared and _event_media_is_stt_input(event, i):
                     audio_paths.append(path)
+                elif event.message_type == MessageType.AUDIO:
+                    # Regular audio remains a file attachment on platforms
+                    # that do not expose it as a user speech input.
+                    audio_file_paths.append(path)
                 if mtype.startswith("video/") or (not mtype and event.message_type == MessageType.VIDEO):
                     video_paths.append(path)
 
@@ -22915,7 +22925,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 result = await asyncio.to_thread(
                     transcribe_audio, path, None, "gateway",
                 )
-                if not result.get("success"):
+                if not result.get("success") and not result.get("no_fallback"):
                     fallback = await asyncio.to_thread(
                         transcribe_audio_local_fallback,
                         path,

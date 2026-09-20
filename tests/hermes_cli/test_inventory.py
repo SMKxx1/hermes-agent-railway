@@ -509,7 +509,3 @@ def _apply_featured_with_dates(rows, dates: dict[str, str]):
 
     with patch("agent.models_dev.get_model_info", side_effect=_fake_get_model_info):
         inventory._apply_featured(rows)
-
-
-
-

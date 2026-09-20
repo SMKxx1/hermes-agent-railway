@@ -532,3 +532,42 @@ def _render_password_form(provider, next_path: str) -> str:
         f'        <button class="provider-btn" type="submit">Sign in</button>\n'
         f'      </form>'
     )
+
+
+def render_totp_html(*, enrollment: bool, otpauth_uri: str = "") -> str:
+    """Render the isolated second-factor page (never cached).
+
+    QR generation is local; the provisioning URI is never sent to a hosted QR
+    service.  The raw URI remains available for authenticator apps which can
+    open a manual ``otpauth://`` link.
+    """
+    qr = ""
+    if enrollment and otpauth_uri:
+        import base64
+        import io
+        import qrcode
+
+        image = qrcode.make(otpauth_uri)
+        stream = io.BytesIO()
+        image.save(stream, format="PNG")
+        src = base64.b64encode(stream.getvalue()).decode("ascii")
+        qr = (
+            '<p>Scan this with Google Authenticator or another compatible app.</p>'
+            f'<img width="220" height="220" alt="Authenticator setup QR code" src="data:image/png;base64,{src}">'
+            f'<p><a href="{html.escape(otpauth_uri, quote=True)}">Open authenticator app</a></p>'
+        )
+    heading = "Set up your authenticator" if enrollment else "Enter your authenticator code"
+    recovery = "" if enrollment else '''
+      <details><summary>Use a recovery code</summary>
+      <form id="recovery"><input name="code" autocomplete="one-time-code" placeholder="XXXXXXXX-XXXXXXXX" required>
+      <button type="submit">Recover account</button></form></details>'''
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{heading} — Hermes Agent</title>
+    <style>*{{box-sizing:border-box}}body{{font-family:system-ui,sans-serif;background:#170d02;color:#fff8ef;max-width:34rem;margin:3rem auto;padding:1.5rem;line-height:1.6}}h1{{line-height:1.2;font-size:1.8rem}}a{{color:#ffcf87;text-underline-offset:.2em}}input,button{{font:inherit;padding:.7rem 1rem;margin:.4rem 0;border-radius:.5rem;max-width:100%}}input{{background:#291a0c;color:#fff8ef;border:1px solid #bfa17e}}button{{background:#ffcf87;color:#291a0c;border:1px solid transparent;cursor:pointer;font-weight:600}}input:focus-visible,button:focus-visible,a:focus-visible,summary:focus-visible{{outline:3px solid #ffcf87;outline-offset:3px}}img{{display:block;background:#fff;padding:.5rem;max-width:100%;height:auto;border-radius:.5rem;margin:1.5rem 0}}details{{margin-top:1.5rem}}summary{{cursor:pointer}}.error{{color:#ff9191}}code,pre{{word-break:break-all;white-space:pre-wrap}}</style></head><body>
+    <h1>{heading}</h1>{qr}<form id="totp"><label>Six-digit code<br><input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]{{6,8}}" required autofocus></label><br><button type="submit">Verify</button></form>{recovery}<p class="error" id="error" hidden></p>
+    <script>(function(){{
+      var err=document.getElementById('error');
+      function post(url, code){{return fetch(url,{{method:'POST',headers:{{'Content-Type':'application/json'}},credentials:'same-origin',body:JSON.stringify({{code:code}})}}).then(function(r){{if(!r.ok)throw new Error(r.status===429?'Too many attempts. Please wait.':'Verification failed.');return r.json()}})}}
+      function done(data){{if(data.recovery_codes&&data.recovery_codes.length){{document.body.innerHTML='<h1>Save recovery codes</h1><p>Each code works once. Store them somewhere safe; they cannot be shown again.</p><pre>'+data.recovery_codes.map(function(x){{return x}}).join('\\n')+'</pre><button id="continue">Continue</button>';document.getElementById('continue').onclick=function(){{location.assign(data.next||'/')}}}}else location.assign(data.next||'/')}}
+      document.getElementById('totp').onsubmit=function(e){{e.preventDefault();post('/auth/totp/verify',this.code.value).then(done).catch(function(x){{err.textContent=x.message;err.hidden=false}})}};
+      var recovery=document.getElementById('recovery');if(recovery)recovery.onsubmit=function(e){{e.preventDefault();post('/auth/totp/recover',this.code.value).then(done).catch(function(x){{err.textContent=x.message;err.hidden=false}})}};
+    }})();</script></body></html>'''

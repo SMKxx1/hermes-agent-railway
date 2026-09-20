@@ -135,5 +135,3 @@ async def test_model_global_persists_when_config_has_missing_model(tmp_path, mon
     assert isinstance(written["model"], dict)
     assert written["model"]["default"] == "gpt-5.5"
     assert written["model"]["provider"] == "openrouter"
-
-

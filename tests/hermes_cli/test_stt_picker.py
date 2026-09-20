@@ -106,6 +106,108 @@ class TestModelPicker:
         args = pc.call_args[0]
         assert args[2] == STT_MODEL_CATALOG["openai"].index("gpt-transcribe")
 
+    def test_qwen_selection_sets_openrouter_transport_without_touching_tts(self):
+        config = {
+            "stt": {"openai": {"model": "whisper-1"}},
+            "tts": {
+                "provider": "elevenlabs",
+                "elevenlabs": {
+                    "voice_id": "voice-id",
+                    "model_id": "eleven_multilingual_v2",
+                },
+            },
+        }
+        qwen_index = STT_MODEL_CATALOG["openai"].index("qwen/qwen3-asr-1.7b")
+
+        with patch("hermes_cli.tools_config._prompt_choice", return_value=qwen_index):
+            _configure_stt_model("openai", config)
+
+        assert config["stt"]["openai"] == {
+            "model": "qwen/qwen3-asr-1.7b",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "${OPENROUTER_API_KEY}",
+        }
+        assert config["tts"] == {
+            "provider": "elevenlabs",
+            "elevenlabs": {
+                "voice_id": "voice-id",
+                "model_id": "eleven_multilingual_v2",
+            },
+        }
+
+    def test_switching_from_qwen_removes_only_qwen_transport(self):
+        config = {
+            "stt": {
+                "openai": {
+                    "model": "qwen/qwen3-asr-1.7b",
+                    "base_url": "https://openrouter.ai/api/v1",
+                    "api_key": "${OPENROUTER_API_KEY}",
+                    "language": "en",
+                }
+            }
+        }
+        native_index = STT_MODEL_CATALOG["openai"].index("gpt-transcribe")
+
+        with patch("hermes_cli.tools_config._prompt_choice", return_value=native_index):
+            _configure_stt_model("openai", config)
+
+        assert config["stt"]["openai"] == {
+            "model": "gpt-transcribe",
+            "language": "en",
+        }
+
+    def test_native_selection_preserves_custom_openai_compatible_transport(self):
+        config = {
+            "stt": {
+                "openai": {
+                    "model": "whisper-1",
+                    "base_url": "https://stt.example.test/v1",
+                    "api_key": "${CUSTOM_STT_KEY}",
+                }
+            }
+        }
+        native_index = STT_MODEL_CATALOG["openai"].index("gpt-transcribe")
+
+        with patch("hermes_cli.tools_config._prompt_choice", return_value=native_index):
+            _configure_stt_model("openai", config)
+
+        assert config["stt"]["openai"] == {
+            "model": "gpt-transcribe",
+            "base_url": "https://stt.example.test/v1",
+            "api_key": "${CUSTOM_STT_KEY}",
+        }
+
+    def test_qwen_key_reference_survives_runtime_expansion_and_unrelated_save(
+        self, tmp_path, monkeypatch
+    ):
+        from hermes_cli.config import load_config, save_config
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("OPENROUTER_API_KEY", "runtime-openrouter-secret")
+        (tmp_path / "config.yaml").write_text(
+            "stt:\n  provider: openai\n  openai:\n    model: whisper-1\n",
+            encoding="utf-8",
+        )
+        config = load_config()
+        qwen_index = STT_MODEL_CATALOG["openai"].index("qwen/qwen3-asr-1.7b")
+
+        with patch("hermes_cli.tools_config._prompt_choice", return_value=qwen_index):
+            _configure_stt_model("openai", config)
+        save_config(config)
+
+        saved = (tmp_path / "config.yaml").read_text(encoding="utf-8")
+        assert "api_key: ${OPENROUTER_API_KEY}" in saved
+        assert "runtime-openrouter-secret" not in saved
+
+        expanded = load_config()
+        assert expanded["stt"]["openai"]["api_key"] == "runtime-openrouter-secret"
+        expanded["display"]["compact"] = True
+        save_config(expanded)
+
+        saved_again = (tmp_path / "config.yaml").read_text(encoding="utf-8")
+        assert "api_key: ${OPENROUTER_API_KEY}" in saved_again
+        assert "runtime-openrouter-secret" not in saved_again
+
 
 class TestConfigOnlyExclusion:
     def test_stt_is_config_only(self):

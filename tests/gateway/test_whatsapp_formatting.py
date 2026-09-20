@@ -7,11 +7,12 @@ Covers:
 """
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from gateway.config import Platform
+from gateway.platforms.base import MessageType
 
 
 @pytest.fixture(autouse=True)
@@ -217,6 +218,90 @@ class TestBridgeEventMetadata:
         assert event.raw_message["hasQuotedMessage"] is True
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("media_type", "expected_type"),
+    [("ptt", MessageType.VOICE), ("audio", MessageType.AUDIO)],
+)
+async def test_whatsapp_ptt_and_regular_audio_keep_distinct_event_types(
+    media_type, expected_type
+):
+    """Both WhatsApp audio variants reach the shared downstream media path."""
+    adapter = _make_adapter()
+    event = await adapter._build_message_event(
+        {
+            "messageId": f"audio-{media_type}",
+            "chatId": "15551234567@s.whatsapp.net",
+            "senderId": "15551234567@s.whatsapp.net",
+            "senderName": "Tester",
+            "chatName": "Tester",
+            "isGroup": False,
+            "body": "",
+            "hasMedia": True,
+            "mediaType": media_type,
+            "mediaUrls": [],
+        }
+    )
+
+    assert event is not None
+    assert event.message_type == expected_type
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message_type", "path", "mime"),
+    [
+        (MessageType.VOICE, "/tmp/whatsapp-ptt.ogg", "audio/ogg"),
+        (MessageType.AUDIO, "/tmp/whatsapp-audio.m4a", "audio/mp4"),
+    ],
+)
+async def test_whatsapp_ptt_and_regular_audio_transcribe_in_idle_and_queue_paths(
+    message_type, path, mime
+):
+    from gateway.config import GatewayConfig
+    from gateway.platforms.base import MessageEvent
+    from gateway.run import GatewayRunner
+    from gateway.session import SessionSource
+
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner.config = GatewayConfig(stt_enabled=True)
+    runner.adapters = {}
+    runner._model = "test-model"
+    runner._base_url = ""
+    runner._has_setup_skill = lambda: False
+    source = SessionSource(
+        platform=Platform.WHATSAPP,
+        chat_id="15551234567@s.whatsapp.net",
+        chat_type="dm",
+    )
+
+    def event():
+        return MessageEvent(
+            text="",
+            message_type=message_type,
+            source=source,
+            media_urls=[path],
+            media_types=[mime],
+        )
+
+    with patch(
+        "tools.transcription_tools.transcribe_audio",
+        return_value={"success": True, "transcript": "whatsapp speech", "provider": "openai"},
+    ) as mock_transcribe:
+        idle = await runner._prepare_inbound_message_text(
+            event=event(), source=source, history=[]
+        )
+        queued_event = event()
+        queued, transcripts = await runner._transcribe_pending_audio_event_once(
+            queued_event, queued_event.text
+        )
+
+    assert idle == queued == '"whatsapp speech"'
+    assert transcripts == ["whatsapp speech"]
+    assert mock_transcribe.call_count == 2
+    mock_transcribe.assert_called_with(path, None, "gateway")
+
+
 # ---------------------------------------------------------------------------
 # display_config tier classification
 # ---------------------------------------------------------------------------
@@ -228,4 +313,3 @@ class TestWhatsAppTier:
         from gateway.display_config import resolve_display_setting
         # TIER_MEDIUM has streaming: None (follow global), not False
         assert resolve_display_setting({}, "whatsapp", "streaming") is None
-

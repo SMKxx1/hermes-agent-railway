@@ -40,10 +40,37 @@ ui-tui/packages/hermes-ink/dist/
 # Environment files
 .env
 .env.*
+**/.env
+**/.env.*
+auth.json
+**/auth.json
+auth.lock
+**/auth.lock
+creds.json
+**/creds.json
+*.pem
+**/*.pem
+*.key
+**/*.key
+*.p12
+**/*.p12
+*.pfx
+**/*.pfx
+*.db
+**/*.db
+*.db-wal
+**/*.db-wal
+*.db-shm
+**/*.db-shm
+*.sqlite
+*.sqlite3
+**/*.sqlite
+**/*.sqlite3
 
-# IDE
+# IDE / agent tooling (worktrees under .claude/ can contain source checkouts)
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 
@@ -59,10 +86,25 @@ htmlcov/
 data/
 .hermes-docker/
 .notebooklm-home/
+sessions/
+**/sessions/
+mcp-tokens/
+**/mcp-tokens/
+whatsapp/session/
+**/whatsapp/session/
+platforms/whatsapp/session/
+**/platforms/whatsapp/session/
 
 # Compose/profile runtime state (bind-mounted; avoid ownership/secret issues)
 hermes-config/
 runtime/
+railway.json
+railway.toml
+.railway/
+local-migration*
+*.tar
+*.tar.gz
+*.zip
 
 # ---------- Not needed inside the Docker image ----------
 
@@ -103,3 +145,15 @@ plans/
 .gitattributes
 .hadolint.yaml
 .mailmap
+
+# Public Railway derivative: local tooling and unrelated metadata
+.hermes/
+.codex/
+.agents/
+contributors/
+mcp-research-data/
+sqlite_leak_fix.png
+log.txt
+Dockerfile.upstream
+*.bak*
+*.log

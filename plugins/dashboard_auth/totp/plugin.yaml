@@ -1,0 +1,8 @@
+name: totp
+version: 1.0.0
+description: "Dashboard auth provider — username/password plus mandatory RFC 6238 authenticator TOTP. Uses a private SQLite state store for encrypted factor secrets, one-time hashed recovery codes, session versions, and cross-worker replay prevention. This provider is exclusive: when loaded it suppresses all other interactive dashboard auth providers."
+author: Hermes Railway contributors
+kind: backend
+requires_env:
+  - HERMES_DASHBOARD_TOTP_AUTH_USERNAME
+  - HERMES_DASHBOARD_TOTP_AUTH_SECRET

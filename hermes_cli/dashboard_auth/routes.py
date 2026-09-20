@@ -16,6 +16,7 @@ The routes:
 from __future__ import annotations
 
 import logging
+import hmac
 import threading
 import time
 from collections import defaultdict, deque
@@ -23,7 +24,8 @@ from typing import Any, Deque, Dict
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from hermes_cli.dashboard_auth import (
     get_provider,
@@ -45,12 +47,39 @@ from hermes_cli.dashboard_auth.cookies import (
     read_session_cookies,
     set_pkce_cookie,
     set_session_cookies,
+    clear_totp_challenge_cookie,
+    read_totp_challenge_cookie,
+    set_totp_challenge_cookie,
 )
-from hermes_cli.dashboard_auth.login_page import render_login_html
+from hermes_cli.dashboard_auth.login_page import render_login_html, render_totp_html
 
 _log = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _active_session_provider(name: str):
+    """Return *name* only when it is permitted to mint browser sessions."""
+    provider = get_provider(name)
+    return provider if provider in list_session_providers() else None
+
+
+def _require_same_origin(request: Request) -> None:
+    """Reject cross-origin browser writes while tolerating non-browser tests.
+
+    SameSite cookies are a useful layer but not the CSRF boundary: a modern
+    browser supplies Origin on JSON POSTs, so check it before any password,
+    factor, recovery, or logout state transition.  Requests without Origin
+    are accepted for backwards-compatible local/native clients; they cannot
+    use a browser's cross-origin fetch path to attach this JSON request.
+    """
+    origin = request.headers.get("origin")
+    if not origin:
+        return
+    from hermes_cli.dashboard_auth.prefix import resolve_public_url
+    expected = resolve_public_url() or str(request.base_url).rstrip("/")
+    if not hmac.compare_digest(origin.rstrip("/"), expected):
+        raise HTTPException(status_code=403, detail="Cross-origin request rejected")
 
 
 def _redirect_uri(request: Request) -> str:
@@ -181,7 +210,7 @@ async def api_auth_providers() -> Any:
 
 @router.get("/auth/login", name="auth_login")
 async def auth_login(request: Request, provider: str, next: str = ""):
-    p = get_provider(provider)
+    p = _active_session_provider(provider)
     if p is None:
         raise HTTPException(
             status_code=404,
@@ -324,7 +353,7 @@ async def auth_native_authorize(
     # SSO-with-password-fallback deployment (one OIDC provider + the bundled
     # ``basic`` provider) would see two session providers, skip the
     # auto-select, and fail desktop login with a misleading "Unknown provider".
-    p = get_provider(provider) if provider else None
+    p = _active_session_provider(provider) if provider else None
     if p is None and not provider:
         native_eligible = [
             pp
@@ -434,7 +463,7 @@ async def auth_callback(
     # ordinary cookie/SPA login.
     broker_state = parts.get("broker", "")
 
-    p = get_provider(provider_name)
+    p = _active_session_provider(provider_name)
     if p is None:
         raise HTTPException(
             status_code=400,
@@ -626,6 +655,7 @@ def _validate_post_login_target(raw: str) -> str:
 _PW_RATE_MAX_ATTEMPTS = 10
 _PW_RATE_WINDOW_SEC = 60.0
 _pw_attempts: Dict[str, Deque[float]] = defaultdict(deque)
+_pw_global_attempts: Deque[float] = deque()
 _pw_attempts_lock = threading.Lock()
 
 
@@ -642,12 +672,21 @@ def _password_rate_limited(ip: str) -> bool:
     cutoff = now - _PW_RATE_WINDOW_SEC
     key = ip or "_unknown_"
     with _pw_attempts_lock:
+        while _pw_global_attempts and _pw_global_attempts[0] < cutoff:
+            _pw_global_attempts.popleft()
+        # Client-controlled X-Forwarded-For must not make rate limiting a
+        # bypass.  This single-owner dashboard has an account-wide budget in
+        # addition to the IP bucket; genuine users still get a reasonable
+        # retry window, while a spoofed address cannot create infinite buckets.
+        if len(_pw_global_attempts) >= _PW_RATE_MAX_ATTEMPTS:
+            return True
         bucket = _pw_attempts[key]
         while bucket and bucket[0] < cutoff:
             bucket.popleft()
         if len(bucket) >= _PW_RATE_MAX_ATTEMPTS:
             return True
         bucket.append(now)
+        _pw_global_attempts.append(now)
         return False
 
 
@@ -655,13 +694,14 @@ def _reset_password_rate_limit() -> None:
     """Test-only: clear all rate-limit buckets."""
     with _pw_attempts_lock:
         _pw_attempts.clear()
+        _pw_global_attempts.clear()
 
 
 class _PasswordLoginBody(BaseModel):
-    provider: str
-    username: str
-    password: str
-    next: str = ""
+    provider: str = Field(min_length=1, max_length=64)
+    username: str = Field(min_length=1, max_length=256)
+    password: str = Field(min_length=1, max_length=1024)
+    next: str = Field(default="", max_length=2048)
 
 
 @router.post("/auth/password-login", name="auth_password_login")
@@ -681,6 +721,7 @@ async def auth_password_login(request: Request, body: _PasswordLoginBody):
       * backing store unreachable → 503
       * too many attempts from this IP → 429
     """
+    _require_same_origin(request)
     ip = _client_ip(request)
     if _password_rate_limited(ip):
         audit_log(
@@ -694,7 +735,7 @@ async def auth_password_login(request: Request, body: _PasswordLoginBody):
             detail="Too many login attempts. Try again shortly.",
         )
 
-    p = get_provider(body.provider)
+    p = _active_session_provider(body.provider)
     if p is None or not getattr(p, "supports_password", False):
         # Don't leak which providers exist or which support passwords —
         # same 404 whether the provider is unknown or OAuth-only.
@@ -707,8 +748,24 @@ async def auth_password_login(request: Request, body: _PasswordLoginBody):
         raise HTTPException(status_code=404, detail="Unknown provider")
 
     try:
-        session = p.complete_password_login(
-            username=body.username, password=body.password
+        # MFA-capable password providers deliberately return a challenge,
+        # never a Session.  The challenge is stored in an HttpOnly Strict
+        # cookie; the browser has no session cookies until the next factor
+        # proof succeeds.
+        begin = getattr(p, "begin_password_login", None)
+        if callable(begin):
+            challenge = await run_in_threadpool(
+                begin, username=body.username, password=body.password
+            )
+            landing = _validate_post_login_target(body.next) or "/"
+            resp = JSONResponse({"ok": True, "next": f"{_prefix(request)}/auth/totp", "pending_next": landing})
+            set_totp_challenge_cookie(
+                resp, challenge=challenge.token, use_https=detect_https(request),
+                prefix=_prefix(request),
+            )
+            return resp
+        session = await run_in_threadpool(
+            p.complete_password_login, username=body.username, password=body.password
         )
     except InvalidCredentialsError:
         audit_log(
@@ -756,8 +813,104 @@ async def auth_password_login(request: Request, body: _PasswordLoginBody):
     return resp
 
 
+# ---------------------------------------------------------------------------
+# Public: password + authenticator TOTP second-factor flow
+# ---------------------------------------------------------------------------
+
+
+def _totp_provider_for_challenge():
+    providers = [p for p in list_session_providers() if hasattr(p, "challenge_details")]
+    return providers[0] if len(providers) == 1 else None
+
+
+@router.get("/auth/totp", name="auth_totp_page")
+async def auth_totp_page(request: Request) -> HTMLResponse:
+    token = read_totp_challenge_cookie(request)
+    provider = _totp_provider_for_challenge()
+    if not token or provider is None:
+        return RedirectResponse(url=f"{_prefix(request)}/login", status_code=302)
+    try:
+        details = await run_in_threadpool(provider.challenge_details, token)
+    except InvalidCredentialsError:
+        resp = RedirectResponse(url=f"{_prefix(request)}/login", status_code=302)
+        clear_totp_challenge_cookie(resp, prefix=_prefix(request))
+        return resp
+    return HTMLResponse(
+        render_totp_html(
+            enrollment=details.get("stage") == "enroll",
+            otpauth_uri=details.get("otpauth_uri", ""),
+        ),
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+class _TotpCodeBody(BaseModel):
+    code: str = Field(min_length=1, max_length=64)
+
+
+class _RecoveryCodeBody(BaseModel):
+    code: str = Field(min_length=1, max_length=64)
+
+
+def _totp_completion_response(request: Request, completion) -> JSONResponse:
+    expires_in = max(60, completion.session.expires_at - int(time.time()))
+    resp = JSONResponse({"ok": True, "next": "/", "recovery_codes": list(completion.recovery_codes)})
+    set_session_cookies(
+        resp, access_token=completion.session.access_token,
+        refresh_token=completion.session.refresh_token,
+        access_token_expires_in=expires_in, use_https=detect_https(request),
+        prefix=_prefix(request), provider=completion.session.provider,
+    )
+    clear_totp_challenge_cookie(resp, prefix=_prefix(request))
+    return resp
+
+
+@router.post("/auth/totp/verify", name="auth_totp_verify")
+async def auth_totp_verify(request: Request, body: _TotpCodeBody):
+    _require_same_origin(request)
+    if _password_rate_limited(_client_ip(request)):
+        raise HTTPException(status_code=429, detail="Too many authentication attempts. Try again shortly.")
+    token = read_totp_challenge_cookie(request)
+    provider = _totp_provider_for_challenge()
+    if not token or provider is None:
+        raise HTTPException(status_code=401, detail="Authentication challenge expired")
+    try:
+        completion = await run_in_threadpool(
+            provider.complete_totp_challenge, token=token, code=body.code
+        )
+    except InvalidCredentialsError:
+        raise HTTPException(status_code=401, detail="Invalid authenticator code")
+    audit_log(AuditEvent.LOGIN_SUCCESS, provider=provider.name, user_id=completion.session.user_id, ip=_client_ip(request))
+    return _totp_completion_response(request, completion)
+
+
+@router.post("/auth/totp/recover", name="auth_totp_recover")
+async def auth_totp_recover(request: Request, body: _RecoveryCodeBody):
+    _require_same_origin(request)
+    if _password_rate_limited(_client_ip(request)):
+        raise HTTPException(status_code=429, detail="Too many authentication attempts. Try again shortly.")
+    token = read_totp_challenge_cookie(request)
+    provider = _totp_provider_for_challenge()
+    if not token or provider is None:
+        raise HTTPException(status_code=401, detail="Authentication challenge expired")
+    try:
+        challenge = await run_in_threadpool(
+            provider.recover_totp_challenge, token=token, recovery_code=body.code
+        )
+    except InvalidCredentialsError:
+        raise HTTPException(status_code=401, detail="Invalid recovery code")
+    # Same opaque cookie now names an enrollment challenge.  The factor reset
+    # has already invalidated all sessions atomically in the provider store.
+    resp = JSONResponse({"ok": True, "next": f"{_prefix(request)}/auth/totp"})
+    set_totp_challenge_cookie(
+        resp, challenge=challenge.token, use_https=detect_https(request), prefix=_prefix(request),
+    )
+    return resp
+
+
 @router.post("/auth/logout", name="auth_logout")
 async def auth_logout(request: Request):
+    _require_same_origin(request)
     _at, rt = read_session_cookies(request)
     if rt:
         # Best-effort revoke. Try every provider so a session minted by

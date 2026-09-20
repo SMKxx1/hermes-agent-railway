@@ -119,7 +119,46 @@ def list_session_providers() -> List[DashboardAuthProvider]:
     sessions). The login page, /auth/login, and the gate's verify/refresh loops
     consult only these. Mirror of list_token_providers.
     """
-    return [p for p in list_providers() if getattr(p, "supports_session", True)]
+    providers = [p for p in list_providers() if getattr(p, "supports_session", True)]
+
+    # A deployment can pin the only interactive providers it is willing to
+    # expose.  This is deliberately resolved here, rather than only at plugin
+    # load time, so every browser entry point (login page, password route,
+    # callback, middleware, and native broker) receives the same policy.
+    # Missing/malformed configuration is backward compatible: it means no
+    # allowlist.  A non-empty allowlist that names no loaded provider leaves
+    # this list empty, which makes a public dashboard fail closed.
+    try:
+        from hermes_cli.config import cfg_get, load_config
+
+        raw = cfg_get(
+            load_config(), "dashboard", "auth_providers", default=None
+        )
+        allowed = {
+            str(name).strip() for name in raw
+            if isinstance(name, str) and str(name).strip()
+        } if isinstance(raw, list) else (None if raw is None else set())
+    except Exception:
+        # A configuration read failure is not permission to choose a weaker
+        # provider.  Public startup will see zero interactive providers.
+        return []
+    if allowed is not None:
+        providers = [p for p in providers if p.name in allowed]
+
+    # A provider may explicitly assert that it is the complete interactive
+    # authentication policy.  This protects security-focused deployments from
+    # a legacy password/OIDC plugin accidentally being enabled alongside it.
+    # If an exclusive provider is loaded but excluded by the allowlist, return
+    # no providers rather than silently falling back to a weaker one.
+    exclusive = [p for p in providers if getattr(p, "exclusive_session_provider", False)]
+    all_exclusive = [
+        p for p in list_providers()
+        if getattr(p, "supports_session", True)
+        and getattr(p, "exclusive_session_provider", False)
+    ]
+    if all_exclusive:
+        return exclusive
+    return providers
 
 
 def clear_providers() -> None:

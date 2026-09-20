@@ -949,8 +949,14 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
     },
     "stt.openai.model": {
         "type": "select",
-        "description": "OpenAI transcription model",
-        "options": ["whisper-1", "gpt-4o-mini-transcribe", "gpt-4o-transcribe", "gpt-transcribe"],
+        "description": "OpenAI-compatible transcription model",
+        "options": [
+            "whisper-1",
+            "gpt-4o-mini-transcribe",
+            "gpt-4o-transcribe",
+            "gpt-transcribe",
+            "qwen/qwen3-asr-1.7b",
+        ],
     },
     "stt.elevenlabs.model_id": {
         "type": "select",

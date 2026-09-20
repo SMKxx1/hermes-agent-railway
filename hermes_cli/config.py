@@ -3576,7 +3576,7 @@ _COMMENTED_SECTIONS = """
 """
 
 
-def save_config(
+def _save_config_under_process_lock(
     config: Dict[str, Any],
     *,
     strip_defaults: bool = True,
@@ -3690,6 +3690,25 @@ def save_config(
         _secure_file(config_path)
         _RAW_CONFIG_CACHE.pop(str(config_path), None)
         _LAST_EXPANDED_CONFIG_BY_PATH[str(config_path)] = copy.deepcopy(current_normalized)
+
+
+def save_config(
+    config: Dict[str, Any],
+    *,
+    strip_defaults: bool = True,
+    preserve_keys: Optional[Set[Tuple[str, ...]]] = None,
+    merge_existing: bool = False,
+):
+    """Save config while serializing writers across processes for this profile."""
+    from hermes_cli.config_transaction import config_transaction
+
+    with config_transaction():
+        return _save_config_under_process_lock(
+            config,
+            strip_defaults=strip_defaults,
+            preserve_keys=preserve_keys,
+            merge_existing=merge_existing,
+        )
 
 
 def _parse_env_value(raw_value: str) -> str:

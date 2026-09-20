@@ -344,7 +344,8 @@ fi
 # entries of hermes_cli.profile_distribution.USER_OWNED_EXCLUDE plus the
 # runtime lock files; keep them in sync if that set changes.
 for f in \
-    auth.json auth.lock .env \
+    auth.json auth.lock .env .op.env .anthropic_oauth.json \
+    dashboard-totp-auth.sqlite3 dashboard-totp-auth.sqlite3-shm dashboard-totp-auth.sqlite3-wal \
     state.db state.db-shm state.db-wal \
     hermes_state.db \
     response_store.db response_store.db-shm response_store.db-wal \
@@ -356,6 +357,14 @@ for f in \
         else
             chown hermes:hermes "$HERMES_HOME/$f" 2>/dev/null || true
         fi
+    fi
+done
+
+# Credential files created by an owner SSH session must remain private and
+# readable after the supervised processes drop privileges.
+for f in .op.env .anthropic_oauth.json dashboard-totp-auth.sqlite3; do
+    if [ -f "$HERMES_HOME/$f" ] && ! refuse_symlinked_path "chmod" "$HERMES_HOME/$f"; then
+        chmod 600 "$HERMES_HOME/$f"
     fi
 done
 
@@ -478,7 +487,7 @@ fi
 # Set HERMES_SKIP_CONFIG_MIGRATION=1 for controlled/manual migrations.
 if [ -f "$HERMES_HOME/config.yaml" ]; then
     s6-setuidgid hermes "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/scripts/docker_config_migrate.py" \
-        || echo "[stage2] Warning: docker_config_migrate.py failed; continuing"
+        || { echo "[stage2] ERROR: config migration failed; refusing to start services" >&2; exit 1; }
 fi
 
 # auth.json: bootstrap from env on first boot only. Same semantics as the

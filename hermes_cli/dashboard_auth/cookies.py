@@ -80,6 +80,9 @@ PKCE_COOKIE = "hermes_session_pkce"
 # like the others for consistency. Short TTL so a user who returns later gets a
 # fresh silent attempt rather than a permanently-disabled one.
 SSO_ATTEMPT_COOKIE = "hermes_sso_attempt"
+# A pre-session password/TOTP challenge.  It deliberately contains only an
+# opaque random handle; all authority and state remain in the provider store.
+TOTP_CHALLENGE_COOKIE = "hermes_totp_challenge"
 
 # Possible name variants we may have to read back. Sorted so most-strict
 # wins on iteration when both happen to be present (shouldn't happen in
@@ -102,6 +105,7 @@ _PKCE_MAX_AGE = 10 * 60
 # stuck on /login forever. The marker is also cleared explicitly on a
 # successful callback and whenever the gate falls back to /login.
 _SSO_ATTEMPT_MAX_AGE = 60
+_TOTP_CHALLENGE_MAX_AGE = 5 * 60
 
 
 def _resolved_name(bare: str, *, use_https: bool, prefix: str) -> str:
@@ -255,6 +259,34 @@ def clear_pkce_cookie(response: Response, *, prefix: str = "") -> None:
             f"{variant}{PKCE_COOKIE}", "", max_age=0,
             path=path, httponly=True, samesite="lax",
         )
+
+
+def set_totp_challenge_cookie(
+    response: Response, *, challenge: str, use_https: bool, prefix: str = "",
+) -> None:
+    """Set a short-lived, Strict, HttpOnly pre-authentication challenge."""
+    response.set_cookie(
+        _resolved_name(TOTP_CHALLENGE_COOKIE, use_https=use_https, prefix=prefix),
+        challenge,
+        max_age=_TOTP_CHALLENGE_MAX_AGE,
+        httponly=True,
+        samesite="strict",
+        path=_cookie_path(prefix),
+        secure=use_https,
+    )
+
+
+def clear_totp_challenge_cookie(response: Response, *, prefix: str = "") -> None:
+    path = _cookie_path(prefix)
+    for variant in _NAME_VARIANTS:
+        response.set_cookie(
+            f"{variant}{TOTP_CHALLENGE_COOKIE}", "", max_age=0,
+            path=path, httponly=True, samesite="strict",
+        )
+
+
+def read_totp_challenge_cookie(request: Request) -> Optional[str]:
+    return _read_with_fallback(request, TOTP_CHALLENGE_COOKIE)
 
 
 def _read_with_fallback(

@@ -126,9 +126,18 @@ ELEVENLABS_STT_BASE_URL = os.getenv("ELEVENLABS_STT_BASE_URL", "https://api.elev
 SUPPORTED_FORMATS = {".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".webm", ".ogg", ".oga", ".opus", ".aac", ".flac", ".caf"}
 LOCAL_NATIVE_AUDIO_FORMATS = {".wav", ".aiff", ".aif"}
 MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB
+OPENROUTER_TRANSCRIPTION_MAX_FILE_SIZE = 25_000_000
+OPENROUTER_AUDIO_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_QWEN_ASR_MODEL = "qwen/qwen3-asr-1.7b"
 
 # Known model sets for auto-correction
-OPENAI_MODELS = {"whisper-1", "gpt-4o-mini-transcribe", "gpt-4o-transcribe", "gpt-transcribe"}
+OPENAI_MODELS = {
+    "whisper-1",
+    "gpt-4o-mini-transcribe",
+    "gpt-4o-transcribe",
+    "gpt-transcribe",
+    OPENROUTER_QWEN_ASR_MODEL,
+}
 GROQ_MODELS = {"whisper-large-v3", "whisper-large-v3-turbo", "distil-whisper-large-v3-en"}
 
 # Singleton for the local model — loaded once, reused across calls
@@ -1741,8 +1750,8 @@ def _load_local_whisper_model(model_name: str, device: str = "auto", compute_typ
     We try the requested config first (fast CUDA path when it works), and on
     any CUDA library load failure fall back to CPU + int8.
     """
-    force_cpu = _should_force_faster_whisper_cpu()
-    if force_cpu:
+    apple_cpu_guard = _should_force_faster_whisper_cpu()
+    if apple_cpu_guard:
         # Importing ctranslate2/faster-whisper itself can abort on some
         # Apple Silicon/Rosetta installs because multiple Intel OpenMP runtimes
         # are already loaded.  Set this before importing faster_whisper so the
@@ -1750,12 +1759,14 @@ def _load_local_whisper_model(model_name: str, device: str = "auto", compute_typ
         os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
     from faster_whisper import WhisperModel
-    if force_cpu:
+    if apple_cpu_guard and device == "auto":
         logger.info(
             "Apple Silicon/Rosetta detected — loading faster-whisper on CPU "
-            "(int8) to avoid native device autodetection crashes"
+            "to avoid native device autodetection crashes"
         )
-        return WhisperModel(model_name, device="cpu", compute_type="int8")
+        device = "cpu"
+        if compute_type == "auto":
+            compute_type = "int8"
 
     try:
         return WhisperModel(model_name, device=device, compute_type=compute_type)
@@ -2260,6 +2271,22 @@ def _transcribe_openai(
         logger.info("Model %s not available on OpenAI, using %s", model_name, DEFAULT_STT_MODEL)
         model_name = DEFAULT_STT_MODEL
 
+    strict_qwen = (
+        provider_label == "openai"
+        and model_name == OPENROUTER_QWEN_ASR_MODEL
+        and str(base_url or "").rstrip("/") == OPENROUTER_AUDIO_BASE_URL
+    )
+
+    def _redacted_qwen_failure(exc: Exception) -> Dict[str, Any]:
+        # Provider responses can contain request metadata or echoed credentials.
+        # Keep those details in local logs only and expose a stable diagnostic.
+        logger.warning("OpenRouter Qwen transcription failed (%s)", type(exc).__name__)
+        return {
+            "success": False,
+            "transcript": "",
+            "error": "OpenRouter Qwen transcription failed",
+        }
+
     try:
         from openai import (
             OpenAI,
@@ -2297,6 +2324,8 @@ def _transcribe_openai(
                 try:
                     transcription = _create_transcription(file_path)
                 except BadRequestError as exc:
+                    if strict_qwen:
+                        return _redacted_qwen_failure(exc)
                     message = str(exc).lower()
                     if not any(k in message for k in ("unsupported", "corrupted", "invalid file")):
                         raise
@@ -2324,15 +2353,25 @@ def _transcribe_openai(
             if callable(close):
                 close()
 
-    except PermissionError:
+    except PermissionError as exc:
+        if strict_qwen:
+            return _redacted_qwen_failure(exc)
         return {"success": False, "transcript": "", "error": f"Permission denied: {file_path}"}
     except APIConnectionError as e:
+        if strict_qwen:
+            return _redacted_qwen_failure(e)
         return {"success": False, "transcript": "", "error": f"Connection error: {e}"}
     except APITimeoutError as e:
+        if strict_qwen:
+            return _redacted_qwen_failure(e)
         return {"success": False, "transcript": "", "error": f"Request timeout: {e}"}
     except APIError as e:
+        if strict_qwen:
+            return _redacted_qwen_failure(e)
         return {"success": False, "transcript": "", "error": f"API error: {e}"}
     except Exception as e:
+        if strict_qwen:
+            return _redacted_qwen_failure(e)
         logger.error("%s transcription failed: %s", provider_label, e, exc_info=True)
         return {"success": False, "transcript": "", "error": f"Transcription failed: {e}"}
 
@@ -2926,6 +2965,8 @@ def _transcribe_prepared_audio(
           - "error" (str, optional): Error message if success is False
           - "provider" (str, optional): Which provider was used
     """
+    stt_config = _load_stt_config()
+
     # Refuse to feed a credential / secret store (auth.json, .env, OAuth
     # tokens, mcp-tokens/, ...) to an STT provider: an external provider would
     # ship its plaintext contents to a third-party API. Mirrors the local-input
@@ -2933,29 +2974,36 @@ def _transcribe_prepared_audio(
     from agent.file_safety import get_read_block_error
     blocked = get_read_block_error(file_path)
     if blocked:
-        return {"success": False, "transcript": "", "error": blocked}
+        return _apply_qwen_single_provider_policy(
+            {"success": False, "transcript": "", "error": blocked},
+            stt_config,
+            model,
+        )
 
     # Apply common path validation before provider resolution so invalid files
     # cannot trigger provider setup or lazy installation. The remote-upload
     # size cap is enforced separately below, only for non-local providers.
     error = _validate_audio_file(file_path, enforce_size_limit=False)
     if error:
-        return error
+        return _apply_qwen_single_provider_policy(error, stt_config, model)
 
     # Load config and determine provider
-    stt_config = _load_stt_config()
     if not is_stt_enabled(stt_config):
-        return {
-            "success": False,
-            "transcript": "",
-            "error": "STT is disabled in config.yaml (stt.enabled: false).",
-        }
+        return _apply_qwen_single_provider_policy(
+            {
+                "success": False,
+                "transcript": "",
+                "error": "STT is disabled in config.yaml (stt.enabled: false).",
+            },
+            stt_config,
+            model,
+        )
 
     provider = _get_provider(stt_config)
     if not _is_local_stt_provider(provider, stt_config):
         error = _validate_audio_file_size(Path(file_path))
         if error:
-            return error
+            return _apply_qwen_single_provider_policy(error, stt_config, model)
 
     # Convert CAF (iMessage voice notes) to WAV for cloud STT providers.
     if Path(file_path).suffix.lower() == ".caf" and provider not in ("local", "local_command"):
@@ -2963,8 +3011,15 @@ def _transcribe_prepared_audio(
         if converted:
             file_path = converted
         else:
-            return {"success": False, "transcript": "",
-                    "error": "CAF audio could not be converted to WAV."}
+            return _apply_qwen_single_provider_policy(
+                {
+                    "success": False,
+                    "transcript": "",
+                    "error": "CAF audio could not be converted to WAV.",
+                },
+                stt_config,
+                model,
+            )
 
     # Pre-upload silence trim for built-in cloud providers: local whisper gets
     # Silero VAD, cloud endpoints get the raw file — collapse long pauses
@@ -2978,7 +3033,15 @@ def _transcribe_prepared_audio(
             trim_cleanup_dir = os.path.dirname(trimmed)
 
     try:
-        return _dispatch_stt_provider(file_path, provider, stt_config, model, source)
+        qwen_size_error = _validate_qwen_openrouter_upload_size(
+            file_path, stt_config, model
+        )
+        if qwen_size_error:
+            return _apply_qwen_single_provider_policy(
+                qwen_size_error, stt_config, model
+            )
+        result = _dispatch_stt_provider(file_path, provider, stt_config, model, source)
+        return _apply_qwen_single_provider_policy(result, stt_config, model)
     finally:
         if trim_cleanup_dir:
             shutil.rmtree(trim_cleanup_dir, ignore_errors=True)
@@ -3150,6 +3213,62 @@ def _dispatch_stt_provider(
     }
 
 
+def _is_qwen_openrouter_config(
+    stt_config: Dict[str, Any], model_override: Optional[str] = None
+) -> bool:
+    """Return whether the configured OpenAI-compatible route is Qwen on OpenRouter."""
+    if str(stt_config.get("provider", "")).strip().lower() != "openai":
+        return False
+    openai_cfg = stt_config.get("openai")
+    if not isinstance(openai_cfg, dict):
+        openai_cfg = {}
+    model_name = model_override or openai_cfg.get("model") or DEFAULT_STT_MODEL
+    base_url = str(openai_cfg.get("base_url") or OPENAI_BASE_URL).strip().rstrip("/")
+    return (
+        str(model_name).strip() == OPENROUTER_QWEN_ASR_MODEL
+        and base_url == OPENROUTER_AUDIO_BASE_URL
+    )
+
+
+def _apply_qwen_single_provider_policy(
+    result: Dict[str, Any],
+    stt_config: Dict[str, Any],
+    model_override: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Mark every Qwen/OpenRouter outcome as ineligible for STT fallback."""
+    if _is_qwen_openrouter_config(stt_config, model_override):
+        result.setdefault("no_fallback", True)
+    return result
+
+
+def _validate_qwen_openrouter_upload_size(
+    file_path: str,
+    stt_config: Dict[str, Any],
+    model_override: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Enforce OpenRouter's decimal 25 MB cap on the final upload artifact."""
+    if not _is_qwen_openrouter_config(stt_config, model_override):
+        return None
+    try:
+        file_size = Path(file_path).stat().st_size
+    except OSError as exc:
+        return {
+            "success": False,
+            "transcript": "",
+            "error": f"Failed to access file: {exc}",
+        }
+    if file_size > OPENROUTER_TRANSCRIPTION_MAX_FILE_SIZE:
+        return {
+            "success": False,
+            "transcript": "",
+            "error": (
+                f"File too large for OpenRouter transcription: {file_size} bytes "
+                f"(max {OPENROUTER_TRANSCRIPTION_MAX_FILE_SIZE} bytes)"
+            ),
+        }
+    return None
+
+
 def transcribe_audio(
     file_path: str,
     model: Optional[str] = None,
@@ -3161,6 +3280,8 @@ def transcribe_audio(
     ``"voice_mode"``) forwarded to the ``pre_transcription`` plugin hook for
     observability. Not used for dispatch.
     """
+    stt_config = _load_stt_config()
+
     # Refuse to feed a credential / secret store (auth.json, .env, OAuth
     # tokens, mcp-tokens/, ...) to an STT provider — before ANY validation or
     # preprocessing, so the refusal names the real reason rather than a
@@ -3168,7 +3289,11 @@ def transcribe_audio(
     from agent.file_safety import get_read_block_error
     blocked = get_read_block_error(file_path)
     if blocked:
-        return {"success": False, "transcript": "", "error": blocked}
+        return _apply_qwen_single_provider_policy(
+            {"success": False, "transcript": "", "error": blocked},
+            stt_config,
+            model,
+        )
 
     # Cap .silk sources before the decoder runs (decoder safety). For all
     # other inputs the remote-upload size cap is provider-scoped and enforced
@@ -3176,23 +3301,30 @@ def transcribe_audio(
     is_silk = Path(file_path).suffix.lower() == ".silk"
     source_error = _validate_audio_source_file(file_path, enforce_size_limit=is_silk)
     if source_error:
-        return source_error
+        return _apply_qwen_single_provider_policy(source_error, stt_config, model)
 
     prepared_path, cleanup_dir, prep_error = _prepare_audio_for_transcription(file_path)
     if prep_error:
-        return prep_error
+        return _apply_qwen_single_provider_policy(prep_error, stt_config, model)
     if prepared_path is None:
-        return {
-            "success": False,
-            "transcript": "",
-            "error": "Audio preprocessing did not produce a file for transcription.",
-        }
+        return _apply_qwen_single_provider_policy(
+            {
+                "success": False,
+                "transcript": "",
+                "error": "Audio preprocessing did not produce a file for transcription.",
+            },
+            stt_config,
+            model,
+        )
 
     try:
         prepared_error = _validate_audio_file(prepared_path, enforce_size_limit=False)
         if prepared_error:
-            return prepared_error
-        return _transcribe_prepared_audio(prepared_path, model, source)
+            return _apply_qwen_single_provider_policy(
+                prepared_error, stt_config, model
+            )
+        result = _transcribe_prepared_audio(prepared_path, model, source)
+        return _apply_qwen_single_provider_policy(result, stt_config, model)
     finally:
         if cleanup_dir:
             shutil.rmtree(cleanup_dir, ignore_errors=True)

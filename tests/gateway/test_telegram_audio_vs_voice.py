@@ -1,14 +1,14 @@
 """
-Tests for #24870 — Telegram: audio file attachments must NOT be routed to STT.
+Tests for Telegram audio inputs: regular audio and voice notes both enter STT.
 
 Telegram distinguishes three kinds of audio payloads:
   - message.voice  → Opus/OGG voice message  → STT pipeline
-  - message.audio  → audio file attachment   → file path note, NOT STT
+   - message.audio  → regular audio attachment → STT pipeline
   - message.document (audio mime) → generic file route
 
 These tests confirm that:
   1. MessageType.VOICE events still flow through the STT pipeline.
-  2. MessageType.AUDIO events bypass STT and get a file-path context note instead.
+   2. MessageType.AUDIO events enter STT and get the transcript in context.
   3. Mixed media lists (voice + audio) split correctly.
 """
 
@@ -81,39 +81,52 @@ async def test_voice_message_still_transcribed():
 
 
 # ---------------------------------------------------------------------------
-# 2. AUDIO file attachment bypasses STT
+# 2. AUDIO file attachment enters STT
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_audio_attachment_context_note_format():
-    """Context note for audio file attachments should include the file path and guidance."""
+async def test_audio_attachment_is_transcribed():
+    """Telegram regular audio follows the same STT path as a voice note."""
     runner = _make_runner(stt_enabled=True)
     source = SessionSource(platform=Platform.TELEGRAM, chat_id="1", chat_type="dm")
     event = _audio_event("/tmp/cache_12345_my_song.mp3")
 
     with patch(
         "tools.transcription_tools.transcribe_audio",
-        side_effect=AssertionError("must not be called"),
-    ):
-        with patch(
-            "tools.credential_files.to_agent_visible_cache_path",
-            side_effect=lambda p: p,
-        ):
-            result = await runner._prepare_inbound_message_text(
-                event=event,
-                source=source,
-                history=[],
-            )
+        return_value={"success": True, "transcript": "regular audio text", "provider": "openai"},
+    ) as mock_transcribe:
+        result = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=[],
+        )
 
-    assert "my_song.mp3" in result
-    assert "audio file attachment" in result.lower()
-    # Should NOT contain the voice-message transcription wrapper text
-    assert "voice message" not in result.lower()
-    # Guides the agent to transcribe/process the file itself rather than
-    # punting back to the user (same bug class as the PDF/DOCX note).
-    assert "transcri" in result.lower()
-    assert "ask the user what they'd like" not in result.lower()
+    mock_transcribe.assert_called_once_with("/tmp/cache_12345_my_song.mp3", None, "gateway")
+    assert "regular audio text" in result
+    assert "audio file attachment" not in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_queued_audio_attachment_transcribes_once_when_inspected_and_drained():
+    runner = _make_runner(stt_enabled=True)
+    source = SessionSource(platform=Platform.TELEGRAM, chat_id="1", chat_type="dm")
+    event = _audio_event("/tmp/queued-song.mp3")
+
+    with patch(
+        "tools.transcription_tools.transcribe_audio",
+        return_value={"success": True, "transcript": "queued audio text", "provider": "openai"},
+    ) as mock_transcribe:
+        first, first_transcripts = await runner._transcribe_pending_audio_event_once(
+            event, event.text
+        )
+        drained, drained_transcripts = await runner._transcribe_pending_audio_event_once(
+            event, event.text
+        )
+
+    assert first == drained == '"queued audio text"'
+    assert first_transcripts == drained_transcripts == ["queued audio text"]
+    mock_transcribe.assert_called_once_with("/tmp/queued-song.mp3", None, "gateway")
 
 
 # ---------------------------------------------------------------------------
@@ -124,4 +137,3 @@ async def test_audio_attachment_context_note_format():
 # ---------------------------------------------------------------------------
 # 4. Telegram gateway: msg.audio → MessageType.AUDIO (not VOICE)
 # ---------------------------------------------------------------------------
-
