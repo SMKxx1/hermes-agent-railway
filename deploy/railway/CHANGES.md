@@ -6,7 +6,7 @@
 - Added mandatory username/password + RFC 6238 TOTP dashboard authentication. Enrollment uses a locally generated QR code, an encrypted private factor store, one-time recovery codes, bounded challenges, replay protection, and owner-only shell recovery.
 - Railway credentials are held in a protected managed overlay. Changing or removing a variable cannot revive its old copy in the volume's `.env`. Instance-generated secrets remain stable on the persistent volume.
 - Removed the custom model orchestrator, its virtual provider and runtime routing, route research, dashboard editor, and API endpoints. Native Hermes tool delegation remains available.
-- Removed private deployment notes, contributor contact mappings, unrelated benchmark artifacts, and inherited publishing workflows. Retained the upstream MIT license. CI checks source and Docker behavior without publishing anything.
+- Removed private deployment notes, contributor contact mappings, unrelated benchmark artifacts, and inherited publishing workflows. Retained the upstream MIT license. CI checks source and Docker behavior without provisioning Railway or publishing artifacts.
 
 ## Bugs fixed
 
@@ -31,6 +31,27 @@ This is a single-owner dashboard deployment with one replica and one persistent 
 
 Keep the signing/encryption secret stable and back it up with the private volume. Changing that secret makes previously encrypted TOTP state unreadable and fails authentication closed; restore the matching secret instead of deleting state blindly. Changing the username/password revokes existing sessions. Logout revokes all sessions for the one configured owner.
 
-Local tests use disposable Docker volumes and synthetic credentials. Railway cloud provisioning, GitHub Actions execution, paid model calls, and real messaging integrations require verification in the new owner's environment. No public Railway template or prebuilt derivative image is published by this source tree.
+Local tests use disposable Docker volumes and synthetic credentials. Railway
+cloud provisioning, GitHub Actions execution, paid model calls, and real
+messaging integrations require verification in the new owner's environment.
+The public template `hermes-agent-with-authenticator-2fa` is published with
+the dashboard username, dashboard password, and `OPENROUTER_API_KEY` as
+deployment inputs; its template form and API configuration were audited
+separately from the source deployment. This source tree does not publish a
+prebuilt derivative image.
+
+## Cloud validation record — 2026-09-21
+
+- Public commit `3f8374b` passed a fresh Railway source deployment check for the
+  image build, HTTPS dashboard, gateway startup, complete TOTP enrollment,
+  protected APIs, and persistence of the authentication session, factor, and
+  workspace across an actual replacement deployment.
+- A temporary marker outside `/opt/data` disappeared during replacement while
+  the persistent volume state remained. An initial Railway volume attachment
+  issue was fixed by reattaching the volume with the CLI in a new test project;
+  no application code changes were required.
+- The published template form and serialized configuration were audited, but
+  template instantiation itself was not tested. No paid model call or real
+  messaging integration was verified.
 
 A broader state regression run identified an existing FTS query-shape assertion failure in `tests/test_hermes_state.py`; the affected `hermes_state.py` is identical to the pinned source baseline. That unrelated test was not changed or disabled.

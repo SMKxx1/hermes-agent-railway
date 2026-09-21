@@ -4,7 +4,24 @@ A reusable, single-owner Railway deployment of [Hermes Agent](https://github.com
 
 This community distribution retains the Hermes agent, tools, messaging integrations, memories, and native agent delegation. The custom model-orchestration and route-research feature has been removed. It is not an official Nous Research or Railway release.
 
-## Deploy your own instance
+## Deploy with the public Railway template
+
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template/hermes-agent-with-authenticator-2fa)
+
+The published template deploys this public source tree with one service, a
+persistent volume at `/opt/data`, and an HTTPS domain targeting port `9119`.
+
+1. Click **Deploy on Railway** and choose your Railway workspace.
+2. Provide your own dashboard username, a password of at least 12 characters,
+   and an `OPENROUTER_API_KEY`.
+3. Deploy, then open the HTTPS dashboard and enroll your authenticator app on
+   the first login. Save the recovery codes.
+
+Railway hosting and model usage are billed to your own accounts. The template
+configuration has been audited; the source deployment validation is recorded in
+the [release notes](deploy/railway/CHANGES.md).
+
+## Deploy manually from a fork
 
 1. Fork this repository and create a **new Railway service** from your fork. The default `Dockerfile` points to `Dockerfile.railway`.
 2. Before deploying, attach a persistent volume at **`/opt/data`** and set these service variables:
@@ -20,7 +37,7 @@ This community distribution retains the Hermes agent, tools, messaging integrati
 
 The initial model is `openai/gpt-5.4-mini` through OpenRouter. You can choose another provider/model in the dashboard and supply your own corresponding key in Railway. Railway hosting and model usage are billed to your own accounts.
 
-See the [deployment guide](deploy/railway/README.md) for password hashes, custom domains, messaging, backup/recovery, local builds, and the optional [infrastructure recipe](.railway/railway.ts). No prebuilt image or public Railway template has been published for this distribution yet.
+See the [deployment guide](deploy/railway/README.md) for password hashes, custom domains, messaging, backup/recovery, local builds, and the optional [infrastructure recipe](.railway/railway.ts).
 
 ## What is shared and what is yours?
 
