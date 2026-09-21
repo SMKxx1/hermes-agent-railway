@@ -60,7 +60,14 @@ jobs:
           python-version: '3.13'
 
       - name: Create test environment
-        run: python -m venv .venv && .venv/bin/pip install --disable-pip-version-check pytest==9.1.1
+        run: python -m venv .venv
+
+      # The shared pytest fixtures import Hermes config even for Docker tests.
+      - name: Install locked project test dependencies
+        run: >-
+          .venv/bin/python -m pip install --disable-pip-version-check
+          uv==0.12.1 &&
+          .venv/bin/uv sync --locked --extra dev --extra web --extra messaging
 
       - name: Build local Railway image
         env:
