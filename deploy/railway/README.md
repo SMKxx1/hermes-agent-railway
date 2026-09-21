@@ -1,11 +1,30 @@
 # Railway deployment
 
-This guide deploys the public source tree with `Dockerfile.railway`. It has not
-been published as a Railway template or prebuilt image. Use a repository and
-Railway account that you control; this guide contains no project IDs, domains,
-deploy hooks, or credentials.
+This guide covers the published Railway template and the manual fork workflow.
+Use a repository and Railway account that you control; this guide contains no
+project IDs, deploy hooks, or credentials.
 
-## Service settings
+## One-click template
+
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template/hermes-agent-with-authenticator-2fa)
+
+The public template is configured to create one service, attach a persistent
+volume at `/opt/data`, and generate an HTTPS domain targeting port `9119`.
+
+1. Click **Deploy on Railway** and select your workspace.
+2. Enter your own dashboard username, a password of at least 12 characters,
+   and `OPENROUTER_API_KEY`.
+3. Deploy and open the generated HTTPS URL. The first successful login starts
+   TOTP enrollment; scan the QR code and save the recovery codes.
+
+The template form and API configuration were audited. Template instantiation
+itself is not part of the source deployment validation; the manual fork
+workflow below remains available when you need to inspect or customize every
+setting.
+
+## Manual fork deployment
+
+### Service settings
 
 Create one Railway service from the repository and set its Dockerfile path to
 `Dockerfile.railway`. Run **one replica**. Attach one persistent volume at
