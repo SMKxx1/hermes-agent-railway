@@ -12,10 +12,12 @@
 
 - A fresh image could not seed `.env` because both the derivative and pinned base excluded `.env.example`; the internal API key was consequently never generated. Bootstrap now creates a safe instance file explicitly.
 - Dashboard availability depended on undocumented environment settings. The image now supplies port and dashboard defaults.
+- The one-click template could let Railpack select an unsupported Python wheel build, and its root `Dockerfile` symlink was not detected. The template now supplies the shared `RAILWAY_DOCKERFILE_PATH=Dockerfile.railway` build selector and port `9119`.
 - Stored dotenv credentials overrode Railway rotations. The managed overlay now makes Railway-owned variables authoritative, including removals.
 - Managed credential parsing interpreted literal dollar expressions differently between the runtime and settings layer. Both now share one dotenv parser with interpolation disabled.
 - Docker config migration failures were logged and ignored. Startup now fails before application services when migration fails.
 - Credential files created by a root shell could become unreadable to the supervised user. Startup repairs ownership and private permissions for the supported credential files and TOTP database.
+- Railway SSH does not include the s6 command directory in `PATH`. Recovery documentation now invokes `/command/s6-setuidgid` explicitly.
 - Telegram/WhatsApp audio handling now passes speech audio to transcription while retaining non-speech audio as attachments. Qwen transcription and its no-fallback behavior are preserved.
 
 ## Performance and maintenance
@@ -31,14 +33,14 @@ This is a single-owner dashboard deployment with one replica and one persistent 
 
 Keep the signing/encryption secret stable and back it up with the private volume. Changing that secret makes previously encrypted TOTP state unreadable and fails authentication closed; restore the matching secret instead of deleting state blindly. Changing the username/password revokes existing sessions. Logout revokes all sessions for the one configured owner.
 
-Local tests use disposable Docker volumes and synthetic credentials. Railway
-cloud provisioning, GitHub Actions execution, paid model calls, and real
-messaging integrations require verification in the new owner's environment.
+Local tests use disposable Docker volumes and synthetic credentials. Cloud
+checks below used separate test services and a temporary provider key. Each
+owner should verify their own deployment and chosen integrations.
 The public template `hermes-agent-with-authenticator-2fa` is published with
 the dashboard username, dashboard password, and `OPENROUTER_API_KEY` as
-deployment inputs; its template form and API configuration were audited
-separately from the source deployment. This source tree does not publish a
-prebuilt derivative image.
+deployment inputs. Shared defaults select `Dockerfile.railway` and port `9119`;
+no owner credentials are included. This source tree does not publish a prebuilt
+derivative image.
 
 ## Cloud validation record — 2026-09-21
 
@@ -50,8 +52,20 @@ prebuilt derivative image.
   the persistent volume state remained. An initial Railway volume attachment
   issue was fixed by reattaching the volume with the CLI in a new test project;
   no application code changes were required.
-- The published template form and serialized configuration were audited, but
-  template instantiation itself was not tested. No paid model call or real
-  messaging integration was verified.
+- A fresh instance created from the corrected published template built and
+  started without manual configuration changes. HTTPS, unauthenticated API
+  rejection, password-to-TOTP enforcement, and fresh authenticator enrollment
+  passed. The `/opt/data` mount was confirmed inside the container.
+- Replacing that template-created container retained the authenticated session,
+  enrolled factor, and workspace marker; its `/tmp` marker disappeared.
+- Both the source service and the template instance completed a real Hermes
+  one-shot request through OpenRouter using `openai/gpt-5.4-mini`. The assistant
+  response was read back through the authenticated dashboard session API.
+  Combined usage estimates for the two smoke tests were approximately $0.026.
+- The temporary provider key was removed from all three test services. After
+  replacement, checks found no usable copy in process environments, managed or
+  persistent dotenv files, or the credential-pool store.
+- Real messaging integrations and interactive browser chat input were not
+  exercised by these model tests.
 
 A broader state regression run identified an existing FTS query-shape assertion failure in `tests/test_hermes_state.py`; the affected `hermes_state.py` is identical to the pinned source baseline. That unrelated test was not changed or disabled.

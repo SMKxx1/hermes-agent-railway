@@ -9,7 +9,11 @@ project IDs, deploy hooks, or credentials.
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template/hermes-agent-with-authenticator-2fa)
 
 The public template is configured to create one service, attach a persistent
-volume at `/opt/data`, and generate an HTTPS domain targeting port `9119`.
+volume at `/opt/data`, select `Dockerfile.railway` through the shared
+`RAILWAY_DOCKERFILE_PATH` variable, and generate an HTTPS domain targeting
+port `9119`. Its three owner inputs remain blank until deployment:
+`HERMES_DASHBOARD_TOTP_AUTH_USERNAME`,
+`HERMES_DASHBOARD_TOTP_AUTH_PASSWORD`, and `OPENROUTER_API_KEY`.
 
 1. Click **Deploy on Railway** and select your workspace.
 2. Enter your own dashboard username, a password of at least 12 characters,
@@ -17,10 +21,10 @@ volume at `/opt/data`, and generate an HTTPS domain targeting port `9119`.
 3. Deploy and open the generated HTTPS URL. The first successful login starts
    TOTP enrollment; scan the QR code and save the recovery codes.
 
-The template form and API configuration were audited. Template instantiation
-itself is not part of the source deployment validation; the manual fork
-workflow below remains available when you need to inspect or customize every
-setting.
+A fresh template instance passed login, authenticator enrollment, a real
+OpenRouter response, and persistence across container replacement. See the
+[validation record](CHANGES.md) for scope. The manual fork workflow below
+remains available when you need to inspect or customize every setting.
 
 ## Manual fork deployment
 
@@ -127,7 +131,7 @@ the factor. If both the authenticator and recovery codes are unavailable, run
 this owner-only command over Railway SSH from `/opt/hermes`:
 
 ```bash
-s6-setuidgid hermes /opt/hermes/.venv/bin/python -m plugins.dashboard_auth.totp reset --confirm
+/command/s6-setuidgid hermes /opt/hermes/.venv/bin/python -m plugins.dashboard_auth.totp reset --confirm
 ```
 
 It invalidates the factor, recovery codes, and all sessions; the next login

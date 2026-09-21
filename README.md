@@ -17,13 +17,13 @@ persistent volume at `/opt/data`, and an HTTPS domain targeting port `9119`.
 3. Deploy, then open the HTTPS dashboard and enroll your authenticator app on
    the first login. Save the recovery codes.
 
-Railway hosting and model usage are billed to your own accounts. The template
-configuration has been audited; the source deployment validation is recorded in
-the [release notes](deploy/railway/CHANGES.md).
+Railway hosting and model usage are billed to your own accounts. A fresh
+instance created from this template passed authentication and a real OpenRouter
+model call; see the [validation record](deploy/railway/CHANGES.md).
 
 ## Deploy manually from a fork
 
-1. Fork this repository and create a **new Railway service** from your fork. The default `Dockerfile` points to `Dockerfile.railway`.
+1. Fork this repository and create a **new Railway service** from your fork. Set its Dockerfile path to `Dockerfile.railway`, or set `RAILWAY_DOCKERFILE_PATH=Dockerfile.railway`. Railway source detection may not follow the root `Dockerfile` symlink.
 2. Before deploying, attach a persistent volume at **`/opt/data`** and set these service variables:
 
    | Variable | Your value |
