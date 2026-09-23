@@ -216,6 +216,19 @@ def set_session_cookies(
     )
 
 
+def _clear_cookie_variants(
+    response: Response, bare_name: str, *, prefix: str, samesite: str = "lax",
+) -> None:
+    for variant in _NAME_VARIANTS:
+        # Deletion is a Set-Cookie operation too: browsers reject prefixed
+        # names without Secure, and __Host- always requires Path=/.
+        response.set_cookie(
+            f"{variant}{bare_name}", "", max_age=0,
+            path="/" if variant == "__Host-" else _cookie_path(prefix),
+            httponly=True, samesite=samesite, secure=bool(variant),
+        )
+
+
 def clear_session_cookies(response: Response, *, prefix: str = "") -> None:
     """Emit Max-Age=0 deletions for both session cookies.
 
@@ -225,20 +238,8 @@ def clear_session_cookies(response: Response, *, prefix: str = "") -> None:
     depends on the request that set it), so we emit deletions for every
     plausible variant under the active path.
     """
-    path = _cookie_path(prefix)
-    for variant in _NAME_VARIANTS:
-        response.set_cookie(
-            f"{variant}{SESSION_AT_COOKIE}", "", max_age=0,
-            path=path, httponly=True, samesite="lax",
-        )
-        response.set_cookie(
-            f"{variant}{SESSION_RT_COOKIE}", "", max_age=0,
-            path=path, httponly=True, samesite="lax",
-        )
-        response.set_cookie(
-            f"{variant}{SESSION_PROVIDER_COOKIE}", "", max_age=0,
-            path=path, httponly=True, samesite="lax",
-        )
+    for name in (SESSION_AT_COOKIE, SESSION_RT_COOKIE, SESSION_PROVIDER_COOKIE):
+        _clear_cookie_variants(response, name, prefix=prefix)
 
 
 def set_pkce_cookie(
@@ -253,12 +254,7 @@ def set_pkce_cookie(
 
 
 def clear_pkce_cookie(response: Response, *, prefix: str = "") -> None:
-    path = _cookie_path(prefix)
-    for variant in _NAME_VARIANTS:
-        response.set_cookie(
-            f"{variant}{PKCE_COOKIE}", "", max_age=0,
-            path=path, httponly=True, samesite="lax",
-        )
+    _clear_cookie_variants(response, PKCE_COOKIE, prefix=prefix)
 
 
 def set_totp_challenge_cookie(
@@ -277,12 +273,7 @@ def set_totp_challenge_cookie(
 
 
 def clear_totp_challenge_cookie(response: Response, *, prefix: str = "") -> None:
-    path = _cookie_path(prefix)
-    for variant in _NAME_VARIANTS:
-        response.set_cookie(
-            f"{variant}{TOTP_CHALLENGE_COOKIE}", "", max_age=0,
-            path=path, httponly=True, samesite="strict",
-        )
+    _clear_cookie_variants(response, TOTP_CHALLENGE_COOKIE, prefix=prefix, samesite="strict")
 
 
 def read_totp_challenge_cookie(request: Request) -> Optional[str]:
@@ -351,12 +342,7 @@ def clear_sso_attempt_cookie(response: Response, *, prefix: str = "") -> None:
     Called on a successful callback and whenever the gate falls back to
     /login, so the marker never lingers to suppress a later silent attempt.
     """
-    path = _cookie_path(prefix)
-    for variant in _NAME_VARIANTS:
-        response.set_cookie(
-            f"{variant}{SSO_ATTEMPT_COOKIE}", "", max_age=0,
-            path=path, httponly=True, samesite="lax",
-        )
+    _clear_cookie_variants(response, SSO_ATTEMPT_COOKIE, prefix=prefix)
 
 
 def detect_https(request: Request) -> bool:

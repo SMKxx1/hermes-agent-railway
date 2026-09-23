@@ -103,6 +103,30 @@ def test_managed_policy_requires_totp_and_loopback(installation):
     assert policy["platforms"]["api_server"]["extra"]["host"] == "127.0.0.1"
 
 
+def test_managed_password_rotation_cannot_revive_stale_config_hash(installation, monkeypatch):
+    from hermes_cli.dashboard_auth import InvalidCredentialsError
+    from hermes_cli.env_loader import load_hermes_dotenv
+    from plugins.dashboard_auth.basic import hash_password
+    from plugins.dashboard_auth.totp import _build_provider
+
+    home, managed, seed, env = installation
+    old_password = "stale-config-password"
+    seed.write_text(yaml.safe_dump({
+        "terminal": {"backend": "local"},
+        "dashboard": {"totp_auth": {"password_hash": hash_password(old_password)}},
+    }))
+    bootstrap(home, managed, seed, env)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed))
+    load_hermes_dotenv()
+    provider = _build_provider()
+    with pytest.raises(InvalidCredentialsError):
+        provider.begin_password_login(username="owner", password=old_password)
+    assert provider.begin_password_login(
+        username="owner", password=env["HERMES_DASHBOARD_TOTP_AUTH_PASSWORD"],
+    )
+
+
 @pytest.mark.parametrize("target", [".env", "config.yaml", ".railway-managed-keys.json"])
 def test_refuses_symlinked_instance_files(installation, tmp_path, target):
     home, managed, seed, env = installation

@@ -93,10 +93,21 @@ def test_image_runtime_and_content_contract(railway_image):
     assert env["S6_BEHAVIOUR_IF_STAGE2_FAILS"] == "2"
     docker("run", "--rm", "--entrypoint", "/opt/hermes/.venv/bin/python", railway_image, "-c", """
 from pathlib import Path
+import importlib.metadata
+import re
+import tomllib
 import gateway.run, tools.transcription_tools
 from plugins.dashboard_auth.totp import TotpAuthProvider
 root=Path('/opt/hermes')
+normalize = lambda name: re.sub(r'[-_.]+', '-', name).lower()
+locked = {}
+for package in tomllib.loads((root/'uv.lock').read_text())['package']:
+    locked.setdefault(normalize(package['name']), set()).add(package['version'])
+for package in importlib.metadata.distributions():
+    name = normalize(package.metadata['Name'])
+    assert package.version in locked.get(name, set()), (name, package.version)
 assert (root/'hermes_cli/web_dist/index.html').is_file()
+assert (root/'ui-tui/dist/entry.js').is_file()
 for name in ['.git','.env','auth.json','HERMES_RAILWAY_IMPLEMENTATION_PLAN.md','HERMES_RAILWAY_IMPLEMENTATION_HANDOVER.md','contributors','mcp-research-data','scripts/release.py','agent/orchestrator.py','hermes_cli/route_research']:
     assert not (root/name).exists(), name
 """)
@@ -140,6 +151,14 @@ def test_fresh_enrollment_persistence_and_legacy_login_denied(instance):
     assert status == 200
     assert len(json.loads(body)["recovery_codes"]) == 8
     assert browser.request("/api/config")[0] == 200
+    # A signed browser session must not authorize another origin's form POST.
+    request = urllib.request.Request(
+        browser.base + "/api/ops/config-migrate", data=b"",
+        headers={"Origin": "https://untrusted.example", "Content-Type": "application/x-www-form-urlencoded"},
+    )
+    with pytest.raises(urllib.error.HTTPError) as rejected:
+        browser.opener.open(request, timeout=10)
+    assert rejected.value.code == 403
     # A real restart must preserve both factor enrollment and the current session.
     docker("restart", name)
     port = json.loads(docker("inspect", name))[0]["NetworkSettings"]["Ports"]["9119/tcp"][0]["HostPort"]

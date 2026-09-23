@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 from typing import Awaitable, Callable
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from hermes_cli.dashboard_auth import list_session_providers
@@ -38,6 +38,7 @@ from hermes_cli.dashboard_auth.cookies import (
     set_sso_attempt_cookie,
 )
 from hermes_cli.dashboard_auth.public_paths import PUBLIC_API_PATHS
+from hermes_cli.dashboard_auth.csrf import require_same_origin
 
 _log = logging.getLogger(__name__)
 
@@ -374,6 +375,15 @@ async def gated_auth_middleware(
         # Return the structured 401 so the desktop knows to refresh or
         # re-login, rather than falling through to the cookie/login redirect.
         return _unauth_response(request, reason="invalid_or_expired_session")
+
+    # Browser cookies are ambient authority. A same-site hostile origin can
+    # submit a form POST with Lax cookies without triggering CORS preflight.
+    # Check before refresh as well as before dispatching the protected route.
+    if request.method not in {"GET", "HEAD", "OPTIONS"}:
+        try:
+            require_same_origin(request)
+        except HTTPException as exc:
+            return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
 
     at, _rt = read_session_cookies(request)
     provider_hint = read_session_provider(request)

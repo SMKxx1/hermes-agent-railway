@@ -147,7 +147,14 @@ class TotpAuthProvider(DashboardAuthProvider):
             raise InvalidCredentialsError("invalid username or password")
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute("SELECT totp_secret FROM account WHERE id=1").fetchone()
+            row = conn.execute("SELECT totp_secret,recovery_pending FROM account WHERE id=1").fetchone()
+            if row and row["recovery_pending"]:
+                # Consuming a recovery code authorizes only that browser's
+                # enrollment challenge. The factor is temporarily absent, but
+                # a password-only caller must not claim a replacement factor.
+                # Keep the recovery form available: another unused recovery
+                # code can restart an expired or abandoned enrollment.
+                return self._new_challenge(conn, "verify")
             stage = "verify" if row and row[0] else "enroll"
             if stage == "enroll":
                 # One pending enrollment globally.  A newer successful
@@ -212,7 +219,7 @@ class TotpAuthProvider(DashboardAuthProvider):
             recovery: tuple[str, ...] = ()
             if row["stage"] == "enroll":
                 conn.execute(
-                    "UPDATE account SET totp_secret=pending_secret,pending_secret=NULL,session_version=session_version+1 WHERE id=1"
+                    "UPDATE account SET totp_secret=pending_secret,pending_secret=NULL,recovery_pending=0,session_version=session_version+1 WHERE id=1"
                 )
                 conn.execute("DELETE FROM challenge")
                 account = conn.execute("SELECT session_version FROM account WHERE id=1").fetchone()
@@ -237,11 +244,12 @@ class TotpAuthProvider(DashboardAuthProvider):
                 conn.execute("UPDATE challenge SET tries=tries+1 WHERE digest=?", (row["digest"],))
                 conn.commit()
                 raise InvalidCredentialsError("invalid recovery code")
-            # A recovery code is an emergency factor reset.  Existing tokens,
-            # the previous factor, and remaining recovery codes all die now.
-            conn.execute("DELETE FROM recovery_code")
+            # A recovery code is an emergency factor reset. Existing tokens
+            # and the previous factor die now. Other unused codes remain
+            # available to restart an abandoned enrollment; completing the
+            # replacement factor rotates the entire recovery-code set.
             conn.execute(
-                "UPDATE account SET totp_secret=NULL,pending_secret=?,last_counter=-1,session_version=session_version+1 WHERE id=1",
+                "UPDATE account SET totp_secret=NULL,pending_secret=?,recovery_pending=1,last_counter=-1,session_version=session_version+1 WHERE id=1",
                 (self._encrypt(secrets.token_bytes(20)),),
             )
             conn.execute("DELETE FROM challenge")
@@ -277,8 +285,19 @@ class TotpAuthProvider(DashboardAuthProvider):
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             payload = _unsign(refresh_token, self._session_key)
-            if payload and payload.get("kind") == "refresh":
-                conn.execute("UPDATE account SET session_version=session_version+1 WHERE id=1")
+            if (
+                payload and payload.get("kind") == "refresh"
+                and payload.get("sub") == self._username
+                and payload.get("exp", 0) > int(time.time())
+            ):
+                # A previously revoked or expired token has no authority over
+                # a later login. Make logout idempotent across workers rather
+                # than allowing one captured old token to log the owner out
+                # indefinitely, even after password rotation or factor reset.
+                conn.execute(
+                    "UPDATE account SET session_version=session_version+1 WHERE id=1 AND session_version=?",
+                    (payload.get("version"),),
+                )
 
     def reset_factor_locally(self) -> None:
         """Owner-SSH recovery API: invalidate all sessions and require enrollment.
@@ -292,7 +311,7 @@ class TotpAuthProvider(DashboardAuthProvider):
             conn.execute("DELETE FROM recovery_code")
             conn.execute("DELETE FROM challenge")
             conn.execute(
-                "UPDATE account SET totp_secret=NULL,pending_secret=NULL,last_counter=-1,session_version=session_version+1 WHERE id=1"
+                "UPDATE account SET totp_secret=NULL,pending_secret=NULL,recovery_pending=0,last_counter=-1,session_version=session_version+1 WHERE id=1"
             )
 
     # ---- SQLite/state helpers --------------------------------------------
@@ -352,7 +371,17 @@ class TotpAuthProvider(DashboardAuthProvider):
             conn.execute("""CREATE TABLE IF NOT EXISTS account (
                 id INTEGER PRIMARY KEY CHECK(id=1), totp_secret BLOB,
                 pending_secret BLOB, session_version INTEGER NOT NULL,
-                last_counter INTEGER NOT NULL, credential_fingerprint TEXT NOT NULL)""")
+                last_counter INTEGER NOT NULL, credential_fingerprint TEXT NOT NULL,
+                recovery_pending INTEGER NOT NULL DEFAULT 0)""")
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(account)")}
+            if "recovery_pending" not in columns:
+                conn.execute("ALTER TABLE account ADD COLUMN recovery_pending INTEGER NOT NULL DEFAULT 0")
+                # Preserve pre-upgrade pending recovery challenges without
+                # reopening enrollment to password-only callers. First-time
+                # setup has version 1 and remains unchanged.
+                conn.execute(
+                    "UPDATE account SET recovery_pending=1 WHERE totp_secret IS NULL AND pending_secret IS NOT NULL AND session_version>1"
+                )
             conn.execute("""CREATE TABLE IF NOT EXISTS challenge (
                 digest BLOB PRIMARY KEY, stage TEXT NOT NULL, expires INTEGER NOT NULL,
                 tries INTEGER NOT NULL DEFAULT 0, used INTEGER NOT NULL DEFAULT 0)""")
@@ -442,6 +471,15 @@ def _config() -> dict:
 
 
 def _resolve(env: str, section: dict, key: str, *, strip: bool = True) -> str:
+    from hermes_cli.managed_scope import load_managed_env
+
+    managed = load_managed_env()
+    if env in managed:
+        # Empty managed values are deliberate tombstones. Falling back to a
+        # writable config hash here would resurrect the old password when a
+        # Railway operator switches from a hash to a plaintext credential.
+        value = managed[env]
+        return str(value).strip() if strip else str(value)
     value = os.environ.get(env)
     if value is None or (not value if not strip else not value.strip()):
         value = section.get(key, "") or ""

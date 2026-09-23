@@ -38,7 +38,12 @@ jobs:
           scripts/run_tests.sh -j 3
           tests/hermes_cli/test_railway_bootstrap.py
           tests/hermes_cli/test_dashboard_auth_middleware.py
+          tests/hermes_cli/test_dashboard_auth_cookies.py
           tests/hermes_cli/test_dashboard_auth_totp_login.py
+          tests/hermes_cli/test_web_server_files.py
+          tests/test_tui_gateway_attachment_safety.py
+          tests/gateway/test_weak_credential_guard.py
+          tests/hermes_cli/test_sessions_export_md_cli.py
           tests/plugins/dashboard_auth/test_totp_provider.py
 
       - name: Compile Railway auth and bootstrap modules
