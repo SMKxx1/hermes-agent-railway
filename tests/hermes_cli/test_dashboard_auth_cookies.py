@@ -1,6 +1,10 @@
 """Tests for the dashboard-auth cookie helpers."""
 from __future__ import annotations
 
+from http.cookies import SimpleCookie
+
+import pytest
+
 from fastapi import FastAPI
 from fastapi.responses import Response
 from fastapi.testclient import TestClient
@@ -11,14 +15,40 @@ from hermes_cli.dashboard_auth.cookies import (
     SESSION_AT_COOKIE,
     SESSION_PROVIDER_COOKIE,
     SESSION_RT_COOKIE,
+    SSO_ATTEMPT_COOKIE,
+    TOTP_CHALLENGE_COOKIE,
     clear_pkce_cookie,
     clear_session_cookies,
+    clear_sso_attempt_cookie,
+    clear_totp_challenge_cookie,
     read_pkce_cookie,
     read_session_cookies,
     read_session_provider,
     set_pkce_cookie,
     set_session_cookies,
 )
+
+
+@pytest.mark.parametrize("prefix", ["", "/hermes"])
+@pytest.mark.parametrize("clear, names", [
+    (clear_session_cookies, (SESSION_AT_COOKIE, SESSION_RT_COOKIE, SESSION_PROVIDER_COOKIE)),
+    (clear_pkce_cookie, (PKCE_COOKIE,)),
+    (clear_sso_attempt_cookie, (SSO_ATTEMPT_COOKIE,)),
+    (clear_totp_challenge_cookie, (TOTP_CHALLENGE_COOKIE,)),
+])
+def test_cookie_deletion_obeys_browser_prefix_requirements(prefix, clear, names):
+    """Browsers reject a deletion that violates __Host-/__Secure- rules."""
+    response = Response()
+    clear(response, prefix=prefix)
+    cookies = SimpleCookie()
+    for header in response.headers.getlist("set-cookie"):
+        cookies.load(header)
+    for name in names:
+        for variant in ("__Host-", "__Secure-", ""):
+            cookie = cookies[f"{variant}{name}"]
+            assert cookie["max-age"] == "0"
+            assert cookie["path"] == ("/" if variant == "__Host-" else prefix or "/")
+            assert bool(cookie["secure"]) == bool(variant)
 
 
 def _build_app(use_https: bool = True, prefix: str = ""):
@@ -131,7 +161,6 @@ def test_read_session_cookies_from_request_secure_prefix():
     at, rt = read_session_cookies(req)
     assert at == "at_value"
     assert rt == "rt_value"
-
 
 
 

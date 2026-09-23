@@ -132,6 +132,66 @@ def _complete_stub_login(client) -> None:
     assert r2.status_code == 302
 
 
+@pytest.mark.parametrize("refresh_only", [False, True])
+@pytest.mark.parametrize("headers", [
+    {"Origin": "https://hostile.fly.dev"},
+    {"Origin": "null"},
+    {"Sec-Fetch-Site": "same-site"},
+    {"Sec-Fetch-Site": "cross-site"},
+])
+def test_cookie_session_rejects_cross_origin_form_post(gated_app, monkeypatch, headers, refresh_only):
+    """A sibling site's form must not trigger an authenticated action."""
+    from types import SimpleNamespace
+
+    calls = []
+    monkeypatch.setattr(
+        web_server, "_spawn_hermes_action",
+        lambda *args: calls.append(args) or SimpleNamespace(pid=123),
+    )
+    _complete_stub_login(gated_app)
+    if refresh_only:
+        gated_app.cookies.delete(f"__Host-{SESSION_AT_COOKIE}")
+    response = gated_app.post("/api/ops/config-migrate", data={"unused": "form"}, headers=headers)
+    assert response.status_code == 403
+    assert calls == []
+
+
+def test_cookie_session_accepts_same_origin_with_public_path_prefix(gated_app, monkeypatch):
+    from types import SimpleNamespace
+
+    calls = []
+    monkeypatch.setattr(
+        web_server, "_spawn_hermes_action",
+        lambda *args: calls.append(args) or SimpleNamespace(pid=123),
+    )
+    _complete_stub_login(gated_app)
+    monkeypatch.setenv("HERMES_DASHBOARD_PUBLIC_URL", "https://fly-app.fly.dev/hermes")
+    response = gated_app.post(
+        "/api/ops/config-migrate", headers={"Origin": "https://fly-app.fly.dev"},
+    )
+    assert response.status_code == 200
+    assert calls == [(["config", "migrate"], "config-migrate")]
+
+
+def test_native_bearer_write_does_not_depend_on_cookie_origin(gated_app, monkeypatch):
+    from types import SimpleNamespace
+
+    calls = []
+    monkeypatch.setattr(
+        web_server, "_spawn_hermes_action",
+        lambda *args: calls.append(args) or SimpleNamespace(pid=123),
+    )
+    _complete_stub_login(gated_app)
+    token = gated_app.cookies.get(f"__Host-{SESSION_AT_COOKIE}")
+    gated_app.cookies.clear()
+    response = gated_app.post(
+        "/api/ops/config-migrate",
+        headers={"Authorization": f"Bearer {token}", "Origin": "null"},
+    )
+    assert response.status_code == 200
+    assert calls == [(["config", "migrate"], "config-migrate")]
+
+
 def test_gated_require_token_endpoint_accepts_cookie_session(gated_app):
     """Regression: ``_require_token`` endpoints must work under the OAuth gate.
 
@@ -356,5 +416,3 @@ def test_all_providers_unreachable_returns_503(_gated_state):
     r = client.get("/api/auth/me")
     assert r.status_code == 503
     assert "unreachable" in r.text.lower()
-
-

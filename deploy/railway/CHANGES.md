@@ -23,7 +23,7 @@
 ## Performance and maintenance
 
 - Dashboard compilation is cached independently of backend-only changes.
-- Dependency manifests are checked against the pinned base, so dependency drift fails the build instead of producing a subtly incompatible image.
+- Application dependencies are installed from this repository's locks over the pinned OS base. Both dashboard and TUI bundles are rebuilt; inconsistent manifests fail the locked install.
 - Managed dotenv loading reuses the existing parsed-file cache, avoiding repeated parsing and writes.
 - Password hashing and authentication database operations run outside the async request event loop. SQLite connections close explicitly, and concurrent first-time factor initialization is serialized.
 

@@ -2229,11 +2229,10 @@ def _resolve_managed_path(
     if ".." in candidate.parts:
         raise HTTPException(status_code=400, detail="Path cannot contain '..'")
 
-    if for_write and not candidate.exists():
-        parent = _canonical_path(candidate.parent)
-        resolved = parent / candidate.name
-    else:
-        resolved = _canonical_path(candidate, require_exists=not for_write)
+    # Resolve the complete path even when creating a file. A dangling symlink
+    # reports exists() == False, but opening it for writing still follows its
+    # target; resolving only its parent would let that write escape the root.
+    resolved = _canonical_path(candidate, require_exists=not for_write)
 
     if root is not None and not _path_is_under(root, resolved):
         raise HTTPException(status_code=403, detail="Path outside managed files root")

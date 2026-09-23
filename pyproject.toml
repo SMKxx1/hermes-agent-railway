@@ -42,6 +42,9 @@ dependencies = [
   "python-dotenv==1.2.2",
   "fire==0.7.1",
   "httpx[socks]==0.28.1",
+  # GHSA-82r6-8w77-94w6 (TLS hostname verification) and
+  # GHSA-5p39-cfhj-2xmp (process-pool stderr deadlock).
+  "anyio==4.14.2",
   "rich==14.3.3",
   "tenacity==9.1.4",
   "pyyaml==6.0.3",
@@ -367,6 +370,10 @@ hermes-agent = "run_agent:main"
 hermes-acp = "acp_adapter.entry:main"
 
 [tool.uv]
+constraint-dependencies = [
+  # Optional notebook/kernel dependencies must use the fixed body parsers.
+  "tornado>=6.5.8",
+]
 override-dependencies = [
   # discord.py's latest published version, 2.7.1, pins pynacl at <1.6. however, pynacl 1.5.0 has known vulnerabilities.
   # discord.py has updated pynacl to 1.6 on `main`, but has not yet published a patch release.
@@ -386,7 +393,8 @@ exclude-newer = "14 days"
 # request-smuggling) fix in 4.4.1, published 2026-08-03. Remove after 2026-08-17.
 # aiohttp, cryptography: same shape — the advisory fixes are newer than the
 # 14-day window, so the resolver cannot see them without an exception.
-exclude-newer-package = { vercel = false, nemo-relay = false, huggingface_hub = false, h2 = false, aiohttp = false, cryptography = false }
+# anyio/tornado: reviewed security fixes override the release-age quarantine.
+exclude-newer-package = { vercel = false, nemo-relay = false, huggingface_hub = false, h2 = false, aiohttp = false, cryptography = false, anyio = false, tornado = false }
 
 [tool.setuptools]
 # Top-level single-file modules (not packages). Without this, uv2nix's

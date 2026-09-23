@@ -125,9 +125,12 @@ used by this deployment.
 4. Store all displayed recovery codes in an offline password manager. Each code is one-use.
 
 Subsequent logins require both the password and an authenticator code. A
-recovery code invalidates existing sessions and starts a new authenticator
-enrollment; remaining recovery codes are rotated. There is no HTTP bypass for
-the factor. If both the authenticator and recovery codes are unavailable, run
+recovery code invalidates existing sessions and the old authenticator, then
+starts a five-minute enrollment in that browser. Password-only logins cannot
+replace this enrollment. If it expires or the browser is closed, sign in again
+and use another unused recovery code. Completing enrollment rotates all
+remaining recovery codes. There is no HTTP bypass for the factor. If both the
+authenticator and recovery codes are unavailable, run
 this owner-only command over Railway SSH from `/opt/hermes`:
 
 ```bash
@@ -138,6 +141,15 @@ It invalidates the factor, recovery codes, and all sessions; the next login
 must enroll a new authenticator. Keep the signing secret unchanged. If it is
 lost, restore it from backup before attempting recovery. Do not delete the
 volume or the TOTP SQLite database by hand.
+
+When upgrading an existing instance, an enrollment already in progress remains
+usable until its original expiry. Older versions immediately deleted all
+recovery codes when recovery began, so an expired pre-upgrade recovery requires
+the owner-only reset above. An older pending first enrollment after a password
+change or local reset has the same stored state as recovery; the migration
+conservatively protects that enrollment too. Complete it before expiry or use
+the owner-only reset to start again. Password-only access never reopens an
+ambiguous enrollment automatically.
 
 ## Configuration and models
 

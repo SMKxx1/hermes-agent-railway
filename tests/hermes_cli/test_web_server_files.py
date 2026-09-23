@@ -90,6 +90,52 @@ def _seed_file(client, root, name="out/hello.txt"):
 
 
 
+@pytest.mark.parametrize("upload_mode", ["json", "stream"])
+def test_upload_rejects_dangling_symlink_outside_managed_root(
+    forced_files_client, tmp_path, upload_mode
+):
+    """A missing symlink destination must receive the same root check as an existing one."""
+    client, root = forced_files_client
+    root.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside.txt"
+    link = root / "upload.txt"
+    link.symlink_to(outside)
+
+    if upload_mode == "json":
+        response = client.post(
+            "/api/files/upload",
+            json={"path": str(link), "data_url": "data:text/plain;base64,aGVsbG8="},
+        )
+    else:
+        response = client.post(
+            "/api/files/upload-stream",
+            data={"path": str(link)},
+            files={"file": ("upload.txt", b"hello", "text/plain")},
+        )
+
+    assert response.status_code == 403
+    assert not outside.exists()
+    assert link.is_symlink()
+
+
+def test_upload_follows_dangling_symlink_inside_managed_root(forced_files_client):
+    """Resolving a new destination must preserve legitimate in-root symlink uploads."""
+    client, root = forced_files_client
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / "new" / "upload.txt"
+    link = root / "upload.txt"
+    link.symlink_to(target)
+
+    response = client.post(
+        "/api/files/upload",
+        json={"path": str(link), "data_url": "data:text/plain;base64,aGVsbG8="},
+    )
+
+    assert response.status_code == 200
+    assert target.read_bytes() == b"hello"
+    assert link.is_symlink()
+
+
 def test_download_authenticates_via_query_token(forced_files_client):
     client, root = forced_files_client
     file_path = _seed_file(client, root)
@@ -300,5 +346,4 @@ def test_credential_dir_trees_blocked_on_subdir_descent(forced_files_client):
     # is filtered because the parent component is a credential dir.
     mcp_listing = client.get("/api/files", params={"path": str(mcp_dir)})
     assert [e["name"] for e in mcp_listing.json()["entries"]] == []
-
 
