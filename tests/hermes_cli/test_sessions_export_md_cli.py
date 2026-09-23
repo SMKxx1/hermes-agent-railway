@@ -70,7 +70,8 @@ def test_sessions_export_redact_scrubs_secrets(monkeypatch, tmp_path):
     import hermes_cli.main as main_mod
     import hermes_state
 
-    secret = "sk-proj-Zz12345678901234567890123456789012345678"
+    # Synthetic credential shape for the redactor; never a provider-issued key.
+    secret = "sk-proj-" + "Zz" + "1234567890" * 3 + "12345678"
 
     class FakeDB:
         def resolve_session_id(self, session_id):
@@ -124,7 +125,6 @@ def _trace_fake_db(captured):
             captured["closed"] = True
 
     return FakeDB()
-
 
 
 

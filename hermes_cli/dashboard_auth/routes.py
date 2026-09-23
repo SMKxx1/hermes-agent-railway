@@ -52,6 +52,7 @@ from hermes_cli.dashboard_auth.cookies import (
     set_totp_challenge_cookie,
 )
 from hermes_cli.dashboard_auth.login_page import render_login_html, render_totp_html
+from hermes_cli.dashboard_auth.csrf import require_same_origin as _require_same_origin
 
 _log = logging.getLogger(__name__)
 
@@ -62,24 +63,6 @@ def _active_session_provider(name: str):
     """Return *name* only when it is permitted to mint browser sessions."""
     provider = get_provider(name)
     return provider if provider in list_session_providers() else None
-
-
-def _require_same_origin(request: Request) -> None:
-    """Reject cross-origin browser writes while tolerating non-browser tests.
-
-    SameSite cookies are a useful layer but not the CSRF boundary: a modern
-    browser supplies Origin on JSON POSTs, so check it before any password,
-    factor, recovery, or logout state transition.  Requests without Origin
-    are accepted for backwards-compatible local/native clients; they cannot
-    use a browser's cross-origin fetch path to attach this JSON request.
-    """
-    origin = request.headers.get("origin")
-    if not origin:
-        return
-    from hermes_cli.dashboard_auth.prefix import resolve_public_url
-    expected = resolve_public_url() or str(request.base_url).rstrip("/")
-    if not hmac.compare_digest(origin.rstrip("/"), expected):
-        raise HTTPException(status_code=403, detail="Cross-origin request rejected")
 
 
 def _redirect_uri(request: Request) -> str:

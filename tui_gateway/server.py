@@ -10678,9 +10678,10 @@ def _queue_attached_image(session: dict, img_bytes: bytes, ext: str, *, prefix: 
     img_dir = _session_images_dir(session)
     img_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    img_path = img_dir / f"{prefix}_{ts}_{session['image_counter']}{ext}"
     try:
-        img_path.write_bytes(img_bytes)
+        img_path = _write_unique_attachment(
+            img_dir, f"{prefix}_{ts}_{session['image_counter']}{ext}", img_bytes
+        )
     except Exception:
         session["image_counter"] = max(0, session["image_counter"] - 1)
         raise
@@ -10752,16 +10753,30 @@ def _sanitize_attachment_name(name: str) -> str:
 
 def _unique_attachment_path(root: Path, filename: str) -> Path:
     candidate = root / filename
-    if not candidate.exists():
+    if not candidate.exists() and not candidate.is_symlink():
         return candidate
     stem = Path(filename).stem or "attachment"
     suffix = Path(filename).suffix
     counter = 2
     while True:
         next_candidate = root / f"{stem}-{counter}{suffix}"
-        if not next_candidate.exists():
+        if not next_candidate.exists() and not next_candidate.is_symlink():
             return next_candidate
         counter += 1
+
+
+def _write_unique_attachment(root: Path, filename: str, payload: bytes) -> Path:
+    while True:
+        target = _unique_attachment_path(root, filename)
+        try:
+            # Claim the name atomically: another upload (or a symlink) can
+            # appear after the availability check. Exclusive creation neither
+            # follows a dangling link nor truncates an existing attachment.
+            with target.open("xb") as handle:
+                handle.write(payload)
+            return target
+        except FileExistsError:
+            continue
 
 
 def _resolve_gateway_attachment_path(raw: str) -> Path | None:
@@ -10840,8 +10855,9 @@ def _stage_session_file_attachment(
         filename = _sanitize_attachment_name(name or Path(str(raw_path or "")).name)
 
     upload_dir = _desktop_attachment_dir(session)
-    target = _unique_attachment_path(upload_dir, _sanitize_attachment_name(filename))
-    target.write_bytes(payload)
+    target = _write_unique_attachment(
+        upload_dir, _sanitize_attachment_name(filename), payload
+    )
     return target.resolve(), True
 
 

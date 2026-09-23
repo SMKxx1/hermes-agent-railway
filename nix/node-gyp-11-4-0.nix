@@ -1,6 +1,7 @@
 {
   buildNpmPackage,
   fetchFromGitHub,
+  jq,
   nodejs,
   lib,
 }:
@@ -17,11 +18,15 @@ let
       hash = "sha256-VtomUV+0kTp34IuS0D0dR4ZMWpk4Ptpk1CBP8rdW2a4=";
     };
 
+    # Only the build tool is packaged. Its upstream test/lint dependencies are
+    # unused (dontNpmBuild) and must not be fetched into the Nix closure.
     postPatch = ''
+      ${jq}/bin/jq 'del(.devDependencies)' package.json > package.json.tmp
+      mv package.json.tmp package.json
       ln -s ${./node-gyp-11-4-0-package-lock.json} package-lock.json
     '';
 
-    npmDepsHash = "sha256-P25m02VxIXkPD7rYI2Wki9+levrtNg2xk8pU+nEUXsE=";
+    npmDepsHash = "sha256-F7QTUSpxoHQ9cDnIpDjHkHIXETRmOMNJwQC60Q5jofI=";
 
     npmDepsFetcherVersion = 2;
 

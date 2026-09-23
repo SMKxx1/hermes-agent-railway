@@ -90,6 +90,160 @@ def test_recovery_consumption_resets_factor_and_invalidates_sessions(provider):
         provider.recover_totp_challenge(token=challenge.token, recovery_code=first.recovery_codes[0])
 
 
+def test_password_alone_cannot_replace_recovery_enrollment(provider):
+    first = _enroll(provider)
+    challenge = provider.begin_password_login(username="owner", password="correct-horse-battery-staple")
+    recovered = provider.recover_totp_challenge(
+        token=challenge.token, recovery_code=first.recovery_codes[0],
+    )
+    # Another worker must not mistake a recovery reset for first-time setup.
+    restarted = TotpAuthProvider(
+        username="owner", password_hash=provider._password_hash,
+        secret=provider._secret, state_path=provider._state_path,
+    )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        attempts = list(pool.map(
+            lambda _n: restarted.begin_password_login(username="owner", password="correct-horse-battery-staple"),
+            range(2),
+        ))
+    for attempt in attempts:
+        assert attempt.stage == "verify"
+        assert "otpauth_uri" not in restarted.challenge_details(attempt.token)
+        with pytest.raises(InvalidCredentialsError):
+            restarted.complete_totp_challenge(token=attempt.token, code=_pending_code(restarted))
+    assert restarted.challenge_details(recovered.token)["stage"] == "enroll"
+    completion = restarted.complete_totp_challenge(token=recovered.token, code=_pending_code(restarted))
+    assert restarted.verify_session(access_token=completion.session.access_token) is not None
+    assert restarted.begin_password_login(
+        username="owner", password="correct-horse-battery-staple",
+    ).stage == "verify"
+
+
+def test_expired_recovery_can_restart_with_unused_recovery_code(provider, monkeypatch):
+    first = _enroll(provider)
+    challenge = provider.begin_password_login(username="owner", password="correct-horse-battery-staple")
+    recovered = provider.recover_totp_challenge(token=challenge.token, recovery_code=first.recovery_codes[0])
+    later = time.time() + 301
+    monkeypatch.setattr(totp_plugin.time, "time", lambda: later)
+    with pytest.raises(InvalidCredentialsError):
+        provider.challenge_details(recovered.token)
+    password_only = provider.begin_password_login(username="owner", password="correct-horse-battery-staple")
+    assert password_only.stage == "verify"
+    recovered = provider.recover_totp_challenge(token=password_only.token, recovery_code=first.recovery_codes[1])
+    assert recovered.stage == "enroll"
+    completion = provider.complete_totp_challenge(token=recovered.token, code=_pending_code(provider))
+    assert provider.verify_session(access_token=completion.session.access_token) is not None
+    # Successful enrollment also retires every unused code from the old set.
+    new_login = provider.begin_password_login(username="owner", password="correct-horse-battery-staple")
+    with pytest.raises(InvalidCredentialsError):
+        provider.recover_totp_challenge(token=new_login.token, recovery_code=first.recovery_codes[2])
+
+
+def test_owner_reset_unlocks_abandoned_recovery(provider):
+    first = _enroll(provider)
+    challenge = provider.begin_password_login(username="owner", password="correct-horse-battery-staple")
+    provider.recover_totp_challenge(token=challenge.token, recovery_code=first.recovery_codes[0])
+    provider.reset_factor_locally()
+    assert provider.begin_password_login(
+        username="owner", password="correct-horse-battery-staple",
+    ).stage == "enroll"
+
+
+def test_legacy_database_migration_preserves_and_protects_recovery_challenge(provider):
+    first = _enroll(provider)
+    challenge = provider.begin_password_login(username="owner", password="correct-horse-battery-staple")
+    recovered = provider.recover_totp_challenge(token=challenge.token, recovery_code=first.recovery_codes[0])
+    with provider._connect() as conn:
+        # The pre-fix implementation deleted ALL recovery hashes immediately
+        # and had no flag distinguishing this state from first-time setup.
+        conn.execute("DELETE FROM recovery_code")
+        conn.execute("ALTER TABLE account DROP COLUMN recovery_pending")
+    migrated = TotpAuthProvider(
+        username="owner", password_hash=provider._password_hash,
+        secret=provider._secret, state_path=provider._state_path,
+    )
+    assert migrated.begin_password_login(
+        username="owner", password="correct-horse-battery-staple",
+    ).stage == "verify"
+    complete = migrated.complete_totp_challenge(token=recovered.token, code=_pending_code(migrated))
+    assert migrated.verify_session(access_token=complete.session.access_token) is not None
+
+
+def test_expired_legacy_recovery_without_codes_requires_owner_reset(provider, monkeypatch):
+    first = _enroll(provider)
+    challenge = provider.begin_password_login(username="owner", password="correct-horse-battery-staple")
+    recovered = provider.recover_totp_challenge(token=challenge.token, recovery_code=first.recovery_codes[0])
+    with provider._connect() as conn:
+        conn.execute("DELETE FROM recovery_code")
+        conn.execute("ALTER TABLE account DROP COLUMN recovery_pending")
+    later = time.time() + 301
+    monkeypatch.setattr(totp_plugin.time, "time", lambda: later)
+    migrated = TotpAuthProvider(
+        username="owner", password_hash=provider._password_hash,
+        secret=provider._secret, state_path=provider._state_path,
+    )
+    with pytest.raises(InvalidCredentialsError):
+        migrated.challenge_details(recovered.token)
+    login = migrated.begin_password_login(username="owner", password="correct-horse-battery-staple")
+    assert login.stage == "verify"
+    with pytest.raises(InvalidCredentialsError):
+        migrated.recover_totp_challenge(token=login.token, recovery_code=first.recovery_codes[1])
+    migrated.reset_factor_locally()
+    completion = _enroll(migrated)
+    assert migrated.verify_session(access_token=completion.session.access_token) is not None
+
+
+@pytest.mark.parametrize("transition", ["password_rotation", "local_reset"])
+@pytest.mark.parametrize("expired", [False, True])
+def test_legacy_pending_setup_after_rotation_or_reset_migrates_conservatively(
+    provider, monkeypatch, transition, expired,
+):
+    password = "correct-horse-battery-staple"
+    if transition == "password_rotation":
+        password = "rotated-password-before-first-enrollment"
+        provider = TotpAuthProvider(
+            username="owner", password_hash=hash_password(password),
+            secret=provider._secret, state_path=provider._state_path,
+        )
+    else:
+        provider.reset_factor_locally()
+    pending = provider.begin_password_login(username="owner", password=password)
+    assert pending.stage == "enroll"
+    with provider._connect() as conn:
+        conn.execute("ALTER TABLE account DROP COLUMN recovery_pending")
+    if expired:
+        later = time.time() + 301
+        monkeypatch.setattr(totp_plugin.time, "time", lambda: later)
+    migrated = TotpAuthProvider(
+        username="owner", password_hash=provider._password_hash,
+        secret=provider._secret, state_path=provider._state_path,
+    )
+    # Legacy setup with a bumped version is indistinguishable from recovery.
+    # Migration must protect the existing challenge rather than reopen setup.
+    assert migrated.begin_password_login(username="owner", password=password).stage == "verify"
+    if expired:
+        with pytest.raises(InvalidCredentialsError):
+            migrated.challenge_details(pending.token)
+        migrated.reset_factor_locally()
+        pending = migrated.begin_password_login(username="owner", password=password)
+    completion = migrated.complete_totp_challenge(token=pending.token, code=_pending_code(migrated))
+    assert migrated.verify_session(access_token=completion.session.access_token) is not None
+
+
+def test_legacy_database_migration_preserves_enrolled_factor_and_session(provider):
+    first = _enroll(provider)
+    with provider._connect() as conn:
+        conn.execute("ALTER TABLE account DROP COLUMN recovery_pending")
+    migrated = TotpAuthProvider(
+        username="owner", password_hash=provider._password_hash,
+        secret=provider._secret, state_path=provider._state_path,
+    )
+    assert migrated.verify_session(access_token=first.session.access_token) is not None
+    assert migrated.begin_password_login(
+        username="owner", password="correct-horse-battery-staple",
+    ).stage == "verify"
+
+
 def test_local_owner_reset_invalidates_session_and_requires_enrollment(provider):
     completion = _enroll(provider)
     provider.reset_factor_locally()
@@ -102,6 +256,22 @@ def test_logout_revoke_invalidates_server_side_session(provider):
     completion = _enroll(provider)
     provider.revoke_session(refresh_token=completion.session.refresh_token)
     assert provider.verify_session(access_token=completion.session.access_token) is None
+
+
+def test_stale_logout_token_cannot_revoke_later_sessions(provider, monkeypatch):
+    first = _enroll(provider).session
+    provider.revoke_session(refresh_token=first.refresh_token)
+    with provider._connect() as conn:
+        encrypted = conn.execute("SELECT totp_secret FROM account WHERE id=1").fetchone()[0]
+    later = time.time() + 60
+    monkeypatch.setattr(totp_plugin.time, "time", lambda: later)
+    challenge = provider.begin_password_login(username="owner", password="correct-horse-battery-staple")
+    current = provider.complete_totp_challenge(
+        token=challenge.token,
+        code=_totp_at(provider._decrypt(encrypted), int(later) // 30),
+    ).session
+    provider.revoke_session(refresh_token=first.refresh_token)
+    assert provider.verify_session(access_token=current.access_token) is not None
 
 
 def test_changed_state_secret_fails_closed(provider):
