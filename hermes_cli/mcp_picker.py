@@ -298,7 +298,10 @@ def run_picker() -> None:
         _handle_row(rows[idx])
 
 
-def install_by_name(identifier: str) -> int:
+def install_by_name(
+    identifier: str, *, non_interactive: Optional[bool] = None,
+    probe: bool = True, enable: bool = True, env: Optional[List[str]] = None,
+) -> int:
     """`hermes mcp install <name>` — non-interactive entry-point.
 
     Returns 0 on success, non-zero on failure (so the CLI can propagate
@@ -315,8 +318,13 @@ def install_by_name(identifier: str) -> int:
         ))
         return 1
     try:
-        install_entry(entry, enable=True)
-    except CatalogError as exc:
+        from hermes_cli.mcp_config import _parse_env_assignments
+
+        install_entry(
+            entry, enable=enable, non_interactive=non_interactive,
+            probe=probe, env_values=_parse_env_assignments(env),
+        )
+    except (CatalogError, ValueError) as exc:
         print(color(f"  ✗ install failed: {exc}", Colors.RED))
         return 1
     return 0

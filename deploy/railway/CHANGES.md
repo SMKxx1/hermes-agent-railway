@@ -1,5 +1,21 @@
 # Railway distribution changes
 
+## MCP catalog and agent execution
+
+- Expanded the catalog from 5 to 25 presets with documented provider endpoints
+  and exact-version local packages.
+- Fixed agent-driven MCP setup cancelling at an interactive prompt, failed
+  connections returning success, and catalog credentials never reaching stdio
+  servers. Added `--yes`, `--no-probe`, declared catalog settings, and headless
+  OAuth configuration followed by dashboard authentication.
+- Dashboard installs now validate inputs without prompting or blocking on a
+  server connection. Existing Railway credentials can be used with blank fields.
+- Railway defaults allow unattended custom code via `approvals.mode: "off"`.
+  Missing execution policy is backfilled on older volumes; explicit owner
+  settings are preserved. User npm installs and package caches use the volume.
+- Added persistent workspace instructions, real subprocess MCP regression tests,
+  and an image contract for non-root Python, npm, and custom MCP execution.
+
 ## Deployment and configuration
 
 - Added a default Docker entry point for source imports, a digest-pinned thin image, first-boot defaults, and an optional Railway TypeScript infrastructure recipe.

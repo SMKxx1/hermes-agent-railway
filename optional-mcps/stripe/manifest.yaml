@@ -1,0 +1,12 @@
+manifest_version: 1
+name: stripe
+description: Manage Stripe customers, products, invoices, and payment data.
+source: https://docs.stripe.com/mcp
+transport:
+  type: http
+  url: https://mcp.stripe.com
+auth:
+  type: oauth
+post_install: |
+  Use Authenticate in the dashboard MCP page and select your Stripe account
+  and environment. MCP access must be enabled in the Stripe dashboard.

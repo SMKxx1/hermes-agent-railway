@@ -227,8 +227,8 @@ TIPS = [
     "browser_vision with annotate=true overlays numbered labels on interactive elements.",
 
     # --- MCP ---
-    "hermes mcp opens an interactive picker of Nous-approved MCPs you can install in one keystroke.",
-    "hermes mcp catalog lists Nous-approved MCP servers shipped with the repo.",
+    "hermes mcp opens an interactive picker of bundled MCP presets you can install in one keystroke.",
+    "hermes mcp catalog lists MCP server presets shipped with this distribution.",
     "hermes mcp install <name> installs a catalog entry, prompts for credentials, and lets you pick which of its tools to enable.",
     "MCP servers are configured in config.yaml — both stdio and HTTP transports supported.",
     "Per-server tool filtering: tools.include whitelists and tools.exclude blacklists specific tools.",

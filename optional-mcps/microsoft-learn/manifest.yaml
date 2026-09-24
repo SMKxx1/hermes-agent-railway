@@ -1,0 +1,9 @@
+manifest_version: 1
+name: microsoft-learn
+description: Search Microsoft and Azure documentation and code samples.
+source: https://learn.microsoft.com/en-us/training/support/mcp
+transport:
+  type: http
+  url: https://learn.microsoft.com/api/mcp
+auth:
+  type: none

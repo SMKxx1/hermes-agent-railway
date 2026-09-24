@@ -1,0 +1,11 @@
+manifest_version: 1
+name: time
+description: Get the current time and convert times between time zones.
+source: https://github.com/modelcontextprotocol/servers/tree/main/src/time
+transport:
+  type: stdio
+  command: uvx
+  args: ["mcp-server-time==2026.8.18"]
+  connect_timeout: 120
+auth:
+  type: none

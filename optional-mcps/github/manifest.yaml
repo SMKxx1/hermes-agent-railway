@@ -1,0 +1,17 @@
+manifest_version: 1
+name: github
+description: Work with GitHub repositories, issues, pull requests, and workflows.
+source: https://github.com/github/github-mcp-server/blob/main/docs/remote-server.md
+transport:
+  type: http
+  url: https://api.githubcopilot.com/mcp/
+auth:
+  type: api_key
+  env:
+    - name: MCP_GITHUB_API_KEY
+      prompt: GitHub personal access token
+      required: true
+      secret: true
+post_install: |
+  Use a GitHub personal access token with access to the repositories you need.
+  Organization policies may require approval or SSO authorization of the token.

@@ -1,0 +1,15 @@
+manifest_version: 1
+name: filesystem
+description: Read, write, and search files in the Hermes workspace.
+source: https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem
+transport:
+  type: stdio
+  command: npx
+  args: ["-y", "@modelcontextprotocol/server-filesystem@2026.8.31", "${HERMES_HOME}/workspace"]
+  connect_timeout: 120
+auth:
+  type: none
+post_install: |
+  Create the workspace directory under your active Hermes home before connecting.
+  Railway creates it automatically on the persistent volume. Change the final
+  argument in mcp_servers.filesystem.args to expose a different directory.

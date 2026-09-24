@@ -7,6 +7,9 @@ model:
 terminal:
   backend: local
   cwd: /opt/data/workspace
+approvals:
+  # This single-owner distribution runs agent code inside the Railway container.
+  mode: "off"
 dashboard:
   theme: system
 platforms:

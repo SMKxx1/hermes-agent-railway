@@ -1,4 +1,4 @@
-"""MCP catalog — curated, Nous-approved MCP servers shipped with the repo.
+"""MCP catalog — server presets shipped with this distribution.
 
 Mirrors the optional-skills/ pattern: each catalog entry lives under
 ``optional-mcps/<name>/manifest.yaml`` and ships disabled. Users discover
@@ -7,9 +7,8 @@ and install them with ``hermes mcp install <name>`` (or by toggling in the
 picker, which flows them through any required env/OAuth setup).
 
 Catalog policy:
-- Entries are added only by merging a PR into hermes-agent. Presence in the
-  ``optional-mcps/`` directory = Nous approval. No community tier, no trust
-  signals beyond "it's in the catalog".
+- Entries live in ``optional-mcps/``. This distribution includes additional
+  presets alongside the upstream catalog; inclusion is not Nous endorsement.
 - Manifests pin transport details (commands, args, refs). Pins follow the
   same supply-chain rules as pyproject dependencies: exact versions for
   package launchers (``uvx pkg==X``, ``npx pkg@X``), full commit SHAs for
@@ -17,9 +16,8 @@ Catalog policy:
   pin time. MCPs are never
   auto-updated; users explicitly re-run ``hermes mcp install <name>`` to
   pull a new manifest version after a repo update.
-- Secrets prompted at install time go to ``~/.hermes/.env`` (the
-  .env-is-for-secrets rule). Non-secret env vars also go to .env to keep
-  one credential store.
+- Secrets prompted at install time go to the active profile's .env.
+  Non-secret server settings go to mcp_servers.<name>.env in config.yaml.
 
 See website/docs/user-guide/mcp-catalog.md for user docs.
 See references/mcp-catalog.md (this repo's skill) for the manifest schema.
@@ -27,9 +25,11 @@ See references/mcp-catalog.md (this repo's skill) for the manifest schema.
 
 from __future__ import annotations
 
+import math
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -86,6 +86,7 @@ class TransportSpec:
     # opt-outs, mode flags). NOT for secrets — credentials go through
     # auth.env so they are prompted for and land in ~/.hermes/.env.
     env: Dict[str, str] = field(default_factory=dict)
+    connect_timeout: Optional[float] = None
 
 
 @dataclass
@@ -208,6 +209,14 @@ def _parse_manifest(path: Path) -> CatalogEntry:
         version=transport_raw.get("version"),
         env=dict(env_raw),
     )
+    if "connect_timeout" in transport_raw:
+        try:
+            timeout = float(transport_raw["connect_timeout"])
+        except (ValueError, TypeError):
+            raise CatalogError(f"{path}: transport.connect_timeout must be a positive number") from None
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise CatalogError(f"{path}: transport.connect_timeout must be a positive number")
+        transport.connect_timeout = timeout
     if t_type == "stdio" and not transport.command:
         raise CatalogError(f"{path}: stdio transport requires 'command'")
     if t_type == "http" and not transport.url:
@@ -480,32 +489,57 @@ def _expand_install_dir(value: str, install_dir: Optional[Path]) -> str:
     return value.replace(_INSTALL_DIR_VAR, str(install_dir))
 
 
-def _prompt_env_vars(specs: List[EnvVarSpec]) -> Dict[str, str]:
-    """Walk the env spec list, prompting the user for each. Writes secrets and
-    non-secrets alike to ~/.hermes/.env via save_env_value()."""
+def _prompt_env_vars(
+    specs: List[EnvVarSpec], *, non_interactive: bool = False,
+    values: Optional[Dict[str, str]] = None,
+    prior_env: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
+    """Resolve declared inputs; persist only newly supplied secrets in .env.
+
+    Validate all required values before installing code or saving credentials.
+    Non-secret values are returned for the server's config.yaml env block.
+    """
+    from hermes_cli import managed_scope
+
+    values = values or {}
+    unknown = set(values) - {spec.name for spec in specs}
+    if unknown:
+        raise CatalogError("Undeclared catalog settings: " + ", ".join(sorted(unknown)))
     collected: Dict[str, str] = {}
+    secrets_to_save: Dict[str, str] = {}
+    missing = []
     for spec in specs:
         existing = get_env_value(spec.name)
-        if existing:
-            print(color(f"  ✓ {spec.name} already set in .env", Colors.GREEN))
-            collected[spec.name] = existing
-            continue
-        value = _prompt_input(
-            spec.prompt,
-            default=spec.default or None,
-            password=spec.secret,
-        )
+        previous = (prior_env or {}).get(spec.name) if not spec.secret else None
+        value = values.get(spec.name) or existing or previous
+        if not value:
+            if non_interactive or managed_scope.is_env_managed(spec.name):
+                value = spec.default
+            else:
+                value = _prompt_input(spec.prompt, default=spec.default or None, password=spec.secret)
         if not value:
             if spec.required:
-                raise CatalogError(f"{spec.name} is required but no value was provided")
+                missing.append(spec.name)
             continue
-        save_env_value(spec.name, value)
+        if spec.secret and value != existing:
+            if managed_scope.is_env_managed(spec.name):
+                raise CatalogError(f"{spec.name} is managed by the deployment. Set it in Railway service variables, then retry.")
+            secrets_to_save[spec.name] = value
         collected[spec.name] = value
+    if missing:
+        raise CatalogError(
+            "Missing required settings: " + ", ".join(missing)
+            + ". Supply credentials in Railway variables or the active profile's .env; "
+            "use --env KEY=VALUE for server settings, then retry."
+        )
+    for name, value in secrets_to_save.items():
+        save_env_value(name, value)
     return collected
 
 
 def _build_server_config(
-    entry: CatalogEntry, install_dir: Optional[Path]
+    entry: CatalogEntry, install_dir: Optional[Path], *,
+    env_values: Optional[Dict[str, str]] = None,
 ) -> dict:
     """Translate a manifest into the ``mcp_servers.<name>`` block format used
     by hermes_cli/mcp_config.py."""
@@ -515,8 +549,18 @@ def _build_server_config(
         cfg["command"] = _expand_install_dir(t.command or "", install_dir)
         if t.args:
             cfg["args"] = [_expand_install_dir(a, install_dir) for a in t.args]
-        if t.env:
-            cfg["env"] = dict(t.env)
+        server_env = dict(t.env)
+        # Stdio children inherit a filtered environment. Saving a credential
+        # in .env alone does NOT forward it to the MCP subprocess.
+        for spec in entry.auth.env:
+            value = (env_values or {}).get(spec.name) or get_env_value(spec.name) or spec.default
+            if spec.secret:
+                if spec.required or value:
+                    server_env[spec.name] = f"${{{spec.name}}}"
+            elif value:
+                server_env[spec.name] = value
+        if server_env:
+            cfg["env"] = server_env
     elif t.type == "http":
         cfg["url"] = t.url
         if entry.auth.type == "oauth":
@@ -525,6 +569,8 @@ def _build_server_config(
             from hermes_cli.mcp_config import _bearer_auth_headers
 
             cfg["headers"] = _bearer_auth_headers(entry.name)
+    if t.connect_timeout is not None:
+        cfg["connect_timeout"] = t.connect_timeout
     return cfg
 
 
@@ -591,7 +637,8 @@ def _write_tools_include(name: str, include: Optional[List[str]]) -> None:
 
 
 def _apply_tool_selection(
-    entry: CatalogEntry, *, prior_selection: Optional[List[str]]
+    entry: CatalogEntry, *, prior_selection: Optional[List[str]],
+    non_interactive: bool = False, probe: bool = True,
 ) -> None:
     """Probe the server and let the user pick which tools to enable.
 
@@ -604,23 +651,30 @@ def _apply_tool_selection(
       - All-on selection clears any filter (no ``tools.include`` written).
       - Sub-selection writes ``tools.include``.
 
-    Probe-fail path:
-      - If manifest declares ``tools.default_enabled`` → apply directly.
+    Probe-fail or skipped path:
+      - Preserve *prior_selection* when present (including an empty list).
+      - Otherwise, apply the manifest's ``tools.default_enabled`` if declared.
       - Otherwise → leave config with no filter (all on when reachable).
-      - Either way, point the user at ``hermes mcp configure <name>``.
+      - On failure, point the user at ``hermes mcp configure <name>``.
     """
+    if not probe:
+        selection = prior_selection if prior_selection is not None else entry.tools.default_enabled
+        _write_tools_include(entry.name, selection)
+        print(color("  Connection not tested; saved prior/default tool selection.", Colors.DIM))
+        return
+
     print()
     print(color(f"  Probing '{entry.name}' for available tools...", Colors.CYAN))
     probed = _probe_tools(entry.name)
 
     # Probe failure path
     if probed is None:
-        manifest_default = entry.tools.default_enabled
-        if manifest_default:
-            _write_tools_include(entry.name, manifest_default)
+        selection = prior_selection if prior_selection is not None else entry.tools.default_enabled
+        if selection is not None:
+            _write_tools_include(entry.name, selection)
             print(color(
-                f"  Couldn\'t probe server. Applied manifest default "
-                f"({len(manifest_default)} tools). "
+                f"  Couldn\'t probe server. Kept prior/default selection "
+                f"({len(selection)} tools). "
                 f"Run `hermes mcp configure {entry.name}` after the server "
                 "is reachable to refine.",
                 Colors.YELLOW,
@@ -645,9 +699,9 @@ def _apply_tool_selection(
     tool_names = [t[0] for t in probed]
 
     # Build the pre-checked set in priority order
-    if prior_selection:
+    if prior_selection is not None:
         pre_set = {n for n in prior_selection if n in tool_names}
-    elif entry.tools.default_enabled:
+    elif entry.tools.default_enabled is not None:
         pre_set = {n for n in entry.tools.default_enabled if n in tool_names}
     else:
         pre_set = set(tool_names)
@@ -657,11 +711,11 @@ def _apply_tool_selection(
     # Non-TTY: skip the checklist. Priority matches the interactive
     # pre-check priority: prior user selection > manifest default > all-on.
     import sys as _sys
-    if not _sys.stdin.isatty():
+    if non_interactive or not _sys.stdin.isatty():
         if prior_selection is not None:
             include = [n for n in prior_selection if n in tool_names]
             _write_tools_include(entry.name, include)
-        elif entry.tools.default_enabled:
+        elif entry.tools.default_enabled is not None:
             include = [n for n in entry.tools.default_enabled if n in tool_names]
             _write_tools_include(entry.name, include)
         else:
@@ -719,21 +773,25 @@ def _apply_tool_selection(
     ))
 
 
-def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
+def install_entry(
+    entry: CatalogEntry, *, enable: bool = True,
+    non_interactive: Optional[bool] = None, probe: bool = True,
+    env_values: Optional[Dict[str, str]] = None,
+) -> None:
     """Install a catalog entry end-to-end.
 
     Steps:
-        1. If ``install.type == git``, clone + run bootstrap commands.
-        2. If ``auth.type == api_key``, prompt for env vars, save to .env.
+        1. Resolve required settings, saving only new secrets to .env.
+        2. If ``install.type == git``, clone + run bootstrap commands.
         3. If ``auth.type == oauth`` (remote MCP / case 1), write the
            ``auth: oauth`` marker (MCP client handles browser on first connect
            in the non-pre-authenticated case).
         4. Translate the manifest into an ``mcp_servers.<name>`` block and
            save into config.yaml.
-        5. Probe the server, present a curses checklist for tool selection,
-           write ``tools.include`` (or no filter, depending on choice).
-           If probe fails, fall back to the manifest's
-           ``tools.default_enabled`` or all-on.
+        5. Optionally probe the server and present a tool checklist in a TTY.
+           Write ``tools.include`` (or no filter, depending on choice).
+           If probing is skipped or fails, preserve the prior selection,
+           then fall back to ``tools.default_enabled`` or all-on.
         6. Print post_install notes.
     """
     print()
@@ -744,16 +802,16 @@ def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
         print(color(f"  Source: {entry.source}", Colors.DIM))
     print()
 
-    install_dir: Optional[Path] = None
-    if entry.install is not None:
-        install_dir = _do_git_install(entry)
+    if non_interactive is None:
+        non_interactive = not (sys.stdin.isatty() and sys.stdout.isatty())
+    prior_env = (installed_servers().get(entry.name) or {}).get("env") or {}
+    collected = _prompt_env_vars(
+        entry.auth.env, non_interactive=non_interactive,
+        values=env_values, prior_env=prior_env,
+    )
 
     # Auth
-    if entry.auth.type == "api_key":
-        print()
-        print(color("  Configure credentials:", Colors.CYAN))
-        _prompt_env_vars(entry.auth.env)
-    elif entry.auth.type == "oauth":
+    if entry.auth.type == "oauth":
         if entry.auth.provider:
             # Case 2: provider-mediated (Google, GitHub, etc.). We rely on
             # the existing `hermes auth <provider>` flow. Surface guidance
@@ -767,11 +825,16 @@ def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
             ))
         else:
             print(color(
-                "  This MCP uses native OAuth 2.1; tokens will be acquired "
-                "on first connection (browser flow).",
+                "  OAuth authorization required: use Authenticate on the "
+                "dashboard MCP page, or `hermes mcp login " + entry.name + "` "
+                "on a local machine.",
                 Colors.DIM,
             ))
     # auth.type == "none": nothing to do.
+
+    install_dir: Optional[Path] = None
+    if entry.install is not None:
+        install_dir = _do_git_install(entry)
 
     # ── Preserve any prior user tool selection across reinstalls ────────
     # Reading BEFORE we overwrite the entry below so a reinstall pre-checks
@@ -780,7 +843,7 @@ def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
 
     # Build and write the mcp_servers entry (without tools filter yet;
     # _apply_tool_selection() finalizes it below).
-    server_cfg = _build_server_config(entry, install_dir)
+    server_cfg = _build_server_config(entry, install_dir, env_values=collected)
     server_cfg["enabled"] = enable
 
     from hermes_cli.mcp_config import _save_mcp_server
@@ -791,7 +854,10 @@ def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
         )
 
     # ── Probe + tool selection ──────────────────────────────────────────
-    _apply_tool_selection(entry, prior_selection=prior_selection)
+    _apply_tool_selection(
+        entry, prior_selection=prior_selection, non_interactive=non_interactive,
+        probe=probe and enable and not (non_interactive and entry.auth.type == "oauth"),
+    )
 
     print()
     print(color(

@@ -12,6 +12,7 @@ import asyncio
 import logging
 import os
 import re
+import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -427,6 +428,9 @@ def cmd_mcp_add(args):
     preset_name = getattr(args, "preset", None)
     raw_env = getattr(args, "env", None)
     raw_connect_timeout = getattr(args, "connect_timeout", None)
+    yes = getattr(args, "yes", False)
+    non_interactive = yes or not (sys.stdin.isatty() and sys.stdout.isatty())
+    no_probe = getattr(args, "no_probe", False)
 
     server_config: Dict[str, Any] = {}
     try:
@@ -441,11 +445,18 @@ def cmd_mcp_add(args):
         )
     except ValueError as exc:
         _error(str(exc))
-        return
+        return 1
 
     if url and explicit_env:
         _error("--env is only supported for stdio MCP servers (--command or stdio presets)")
-        return
+        return 1
+
+    if url and command:
+        _error("Specify either --url or --command, not both")
+        return 1
+    if auth_type and not url:
+        _error("--auth is only supported for HTTP MCP servers (--url)")
+        return 1
 
     # Validate transport
     if not url and not command:
@@ -454,14 +465,17 @@ def cmd_mcp_add(args):
         _info('  hermes mcp add ink --url "https://mcp.ml.ink/mcp"')
         _info('  hermes mcp add github --command npx --args @modelcontextprotocol/server-github')
         _info('  hermes mcp add myserver --preset mypreset')
-        return
+        return 1
 
     # Check if server already exists
     existing = _get_mcp_servers()
-    if name in existing:
+    if name in existing and not yes:
+        if non_interactive:
+            _error(f"Server '{name}' already exists. Use --yes to replace it.")
+            return 1
         if not _confirm(f"Server '{name}' already exists. Overwrite?", default=False):
             _info("Cancelled.")
-            return
+            return 1
 
     # Build initial config
     if url:
@@ -480,11 +494,17 @@ def cmd_mcp_add(args):
         for issue in issues:
             _warning(issue)
         _warning(f"Server '{name}' was NOT saved due to suspicious configuration.")
-        return
+        return 1
 
     # ── Authentication ────────────────────────────────────────────────
 
-    if url and auth_type == "oauth":
+    if url and auth_type == "oauth" and non_interactive:
+        # An agent can configure OAuth, but account authorization belongs to
+        # the user's browser. Do not start a localhost callback flow on Railway.
+        server_config["auth"] = "oauth"
+        no_probe = True
+        _info("OAuth configured. Use Authenticate on the dashboard MCP page, or `hermes mcp login " + name + "` on a local machine.")
+    elif url and auth_type == "oauth":
         print()
         _info(f"Starting OAuth flow for '{name}'...")
         oauth_ok = False
@@ -509,13 +529,15 @@ def cmd_mcp_add(args):
                 pass
             else:
                 _info("Cancelled.")
-                return
+                return 1
 
-    elif url:
+    elif url and auth_type != "none":
         # Prompt for API key / Bearer token for HTTP servers
         print()
         _info(f"Connecting to {url}")
-        needs_auth = _confirm("Does this server require authentication?", default=True)
+        env_key = _env_key_for_server(name)
+        existing_key = get_env_value(env_key)
+        needs_auth = (auth_type == "header" or bool(existing_key)) if non_interactive else _confirm("Does this server require authentication?", default=True)
         if needs_auth:
             if auth_type == "header" or not auth_type:
                 env_key = _env_key_for_server(name)
@@ -523,6 +545,9 @@ def cmd_mcp_add(args):
                 if existing_key:
                     _success(f"{env_key}: already configured")
                 else:
+                    if non_interactive:
+                        _error(f"Missing {env_key}. Set it in Railway variables or the active profile's .env, then retry.")
+                        return 1
                     api_key = _prompt("API key / Bearer token", password=True)
                     if api_key:
                         server_config["headers"] = _save_bearer_auth_token(
@@ -534,6 +559,14 @@ def cmd_mcp_add(args):
                 if existing_key:
                     server_config["headers"] = _bearer_auth_headers(name)
 
+    if no_probe:
+        server_config["enabled"] = True
+        if not _save_mcp_server(name, server_config):
+            return 1
+        _success(f"Saved '{name}' (connection not tested).")
+        _info(f"Run `hermes mcp test {name}` to verify. Start a new session to load its tools.")
+        return 0
+
     # ── Discovery: connect and list tools ─────────────────────────────
 
     print()
@@ -543,19 +576,23 @@ def cmd_mcp_add(args):
         tools = _probe_single_server(name, server_config)
     except Exception as exc:
         _error(f"Failed to connect: {exc}")
+        if non_interactive:
+            _info("Server not saved. Fix the connection, or use --no-probe to configure it before it is available.")
+            return 1
         if _confirm("Save config anyway (you can test later)?", default=False):
             server_config["enabled"] = False
             if _save_mcp_server(name, server_config):
                 _success(f"Saved '{name}' to config (disabled)")
                 _info("Fix the issue, then: hermes mcp test " + name)
-        return
+        return 1
 
     if not tools:
         _warning("Server connected but reported no tools.")
-        if _confirm("Save config anyway?", default=True):
+        if non_interactive or _confirm("Save config anyway?", default=True):
             if _save_mcp_server(name, server_config):
                 _success(f"Saved '{name}' to config")
-        return
+                return 0
+        return 1
 
     # ── Tool selection ────────────────────────────────────────────────
 
@@ -568,18 +605,20 @@ def cmd_mcp_add(args):
     print()
 
     # Ask: enable all, select, or cancel
-    try:
-        choice = input(
-            color(f"  Enable all {len(tools)} tools? [Y/n/select]: ", Colors.YELLOW)
-        ).strip().lower()
-    except (KeyboardInterrupt, EOFError):
-        print()
-        _info("Cancelled.")
-        return
+    choice = ""
+    if not non_interactive:
+        try:
+            choice = input(
+                color(f"  Enable all {len(tools)} tools? [Y/n/select]: ", Colors.YELLOW)
+            ).strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            _info("Cancelled.")
+            return 1
 
     if choice in {"n", "no"}:
         _info("Cancelled — server not saved.")
-        return
+        return 1
 
     if choice in {"s", "select"}:
         # Interactive tool selection
@@ -596,7 +635,7 @@ def cmd_mcp_add(args):
 
         if not chosen:
             _info("No tools selected — server not saved.")
-            return
+            return 1
 
         chosen_names = [tools[i][0] for i in sorted(chosen)]
         server_config.setdefault("tools", {})["include"] = chosen_names
@@ -615,6 +654,8 @@ def cmd_mcp_add(args):
         print()
         _success(f"Saved '{name}' to {display_hermes_home()}/config.yaml ({tool_count}/{total} tools enabled)")
         _info("Start a new session to use these tools.")
+        return 0
+    return 1
 
 
 # ─── hermes mcp remove ───────────────────────────────────────────────────────
@@ -730,7 +771,7 @@ def cmd_mcp_test(args):
         available = list(servers.keys())
         if available:
             _info(f"Available: {', '.join(available)}")
-        return
+        return 1
 
     cfg = servers[name]
     print()
@@ -769,7 +810,7 @@ def cmd_mcp_test(args):
     except Exception as exc:
         elapsed_ms = (time.monotonic() - start) * 1000
         _error(f"Connection failed ({elapsed_ms:.0f}ms): {exc}")
-        return
+        return 1
 
     _success(f"Connected ({elapsed_ms:.0f}ms)")
     _success(f"Tools discovered: {len(tools)}")
@@ -1092,7 +1133,13 @@ def mcp_command(args):
     if action == "install":
         from hermes_cli.mcp_picker import install_by_name
         import sys as _sys
-        rc = install_by_name(getattr(args, "identifier", "") or "")
+        rc = install_by_name(
+            getattr(args, "identifier", "") or "",
+            non_interactive=getattr(args, "yes", False) or not (sys.stdin.isatty() and sys.stdout.isatty()),
+            probe=not getattr(args, "no_probe", False),
+            enable=not getattr(args, "disabled", False),
+            env=getattr(args, "env", None),
+        )
         if rc:
             _sys.exit(rc)
         return
@@ -1112,7 +1159,9 @@ def mcp_command(args):
 
     handler = handlers.get(action)
     if handler:
-        handler(args)
+        rc = handler(args)
+        if rc:
+            sys.exit(rc)
     else:
         # No subcommand — drop the user into the catalog picker. This is the
         # "try enabling and it flows you into setup" UX matching `hermes plugin`.
@@ -1120,7 +1169,7 @@ def mcp_command(args):
         run_picker()
         print(color("  Commands:", Colors.CYAN))
         _info("hermes mcp                                    Open the catalog picker (default)")
-        _info("hermes mcp catalog                            List Nous-approved MCPs")
+        _info("hermes mcp catalog                            List bundled MCP presets")
         _info("hermes mcp install <name>                     Install a catalog MCP")
         _info("hermes mcp serve                              Run as MCP server")
         _info("hermes mcp add <name> --url <endpoint>        Add a custom MCP server")

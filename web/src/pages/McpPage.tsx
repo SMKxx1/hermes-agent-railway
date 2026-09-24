@@ -279,13 +279,8 @@ export default function McpPage() {
 
   const handleInstallSubmit = () => {
     if (!installEntry) return;
-    const missing = installEntry.required_env.filter(
-      (item) => item.required && !(installEnv[item.name] ?? "").trim(),
-    );
-    if (missing.length > 0) {
-      showToast(`${missing[0].prompt} required`, "error");
-      return;
-    }
+    // The server resolves Railway/profile credentials and manifest defaults.
+    // An empty form field does not mean that a required setting is missing.
     const envMap: Record<string, string> = {};
     Object.entries(installEnv).forEach(([k, v]) => {
       if (v.trim()) envMap[k] = v.trim();
@@ -542,7 +537,8 @@ export default function McpPage() {
 
             <div className="p-5 grid gap-4">
               <p className="text-xs text-muted-foreground">
-                This MCP requires the following values to be configured.
+                Leave fields blank to use existing Railway/profile values or
+                defaults. Missing required settings will be reported on install.
               </p>
               {installEntry.required_env.map((item) => (
                 <div className="grid gap-2" key={item.name}>
@@ -752,7 +748,7 @@ export default function McpPage() {
         </div>
 
         <p className="text-xs text-muted-foreground">
-          Browse Nous-approved MCP servers and install them with one click.
+          Browse bundled MCP server presets and install them with one click.
         </p>
 
         {catalog.length === 0 && (

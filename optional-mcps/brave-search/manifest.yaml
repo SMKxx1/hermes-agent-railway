@@ -1,0 +1,19 @@
+manifest_version: 1
+name: brave-search
+description: Search the web, images, videos, and news with Brave Search.
+source: https://github.com/brave/brave-search-mcp-server
+transport:
+  type: stdio
+  command: npx
+  args: ["-y", "@brave/brave-search-mcp-server@2.1.3", "--transport", "stdio"]
+  connect_timeout: 120
+auth:
+  type: api_key
+  env:
+    - name: BRAVE_API_KEY
+      prompt: Brave Search API key
+      required: true
+      secret: true
+post_install: |
+  Obtain a key from https://api-dashboard.search.brave.com/ and supply
+  BRAVE_API_KEY as a Railway variable or through the catalog credential form.

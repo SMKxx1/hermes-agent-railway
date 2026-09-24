@@ -15,17 +15,42 @@ For ad-hoc, one-off MCP tool calls from the terminal without configuring anythin
 
 ## Prerequisites
 
-- **mcp Python package** -- optional dependency; install with `pip install mcp`. If not installed, MCP support is silently disabled.
+- **mcp Python package** -- included in the Railway image and standard MCP-enabled Hermes installs.
 - **Node.js** -- required for `npx`-based MCP servers (most community servers)
 - **uv** -- required for `uvx`-based MCP servers (Python-based servers)
 
-Install the MCP SDK:
+On Railway, use the installed `hermes` command. Install custom Python dependencies
+in a project virtual environment under `$HERMES_HOME/workspace`, rather than the
+read-only Hermes application environment.
+
+## Agent-driven installation
+
+Use `terminal` to configure servers for the user:
 
 ```bash
-pip install mcp
-# or, if using uv:
-uv pip install mcp
+hermes mcp catalog
+hermes mcp install time --yes
+hermes mcp add custom --yes --command python --args /opt/data/workspace/server.py
+hermes mcp test custom
 ```
+
+Use the active `$HERMES_HOME/workspace` for custom scripts; `/opt/data/workspace`
+is the default Railway path. Put all CLI options before `--args`. `--yes`
+skips prompts; headless execution selects this behavior automatically. Use
+`--no-probe` to save a server before it is reachable, and report that connection
+testing is still pending. Check the command's exit status before claiming success.
+
+For HTTP servers, `hermes mcp add NAME --yes --url URL --auth none|header|oauth`
+selects the authentication method. Catalog installs use their declared credentials
+from Railway variables or the profile's `.env`; non-secret settings can be supplied
+with `--env KEY=VALUE`. Missing values are reported by name. Have the owner enter
+secrets in Railway or the dashboard, rather than asking for them in chat.
+
+On Railway, OAuth requires the owner to use **Authenticate** in the dashboard MCP
+page. Installation alone does not authorize the account, and a CLI localhost
+callback inside the container is not reachable from the owner's browser. After
+setup, start a new conversation to load tools without changing the current
+conversation's cached prompt. Do not restart the gateway during an active task.
 
 ## Quick Start
 

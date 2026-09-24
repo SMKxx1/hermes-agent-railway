@@ -1,0 +1,18 @@
+manifest_version: 1
+name: firecrawl
+description: Scrape, crawl, search, and extract structured data from websites.
+source: https://github.com/firecrawl/firecrawl-mcp-server
+transport:
+  type: stdio
+  command: npx
+  args: ["-y", "firecrawl-mcp@3.24.0"]
+  connect_timeout: 120
+auth:
+  type: api_key
+  env:
+    - name: FIRECRAWL_API_KEY
+      prompt: Firecrawl API key
+      required: true
+      secret: true
+post_install: |
+  Supply FIRECRAWL_API_KEY in Railway. Calls use your Firecrawl account's quota.

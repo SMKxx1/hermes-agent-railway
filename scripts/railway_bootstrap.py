@@ -6,6 +6,7 @@ with temporary directories. No credential is baked into source or the image.
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 from pathlib import Path
@@ -102,6 +103,44 @@ def _dotenv(values: Mapping[str, str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _seed_execution_defaults(path: Path, defaults: dict, *, uid: int | None, gid: int | None) -> None:
+    """Backfill the Railway execution policy without replacing an owner choice."""
+    mode = (defaults.get("approvals") or {}).get("mode")
+    if mode is None:
+        return
+    from ruamel.yaml import YAML
+    from ruamel.yaml.scalarstring import DoubleQuotedScalarString
+
+    document = YAML()
+    document.preserve_quotes = True
+    config = document.load(path.read_text(encoding="utf-8"))
+    if not isinstance(config, dict):
+        raise BootstrapError("config.yaml must be a mapping")
+    if config.get("approvals") is None:
+        config["approvals"] = {}
+    approvals = config["approvals"]
+    if not isinstance(approvals, dict):
+        raise BootstrapError("config.yaml approvals must be a mapping")
+    if "mode" in approvals:
+        return
+    # The runtime also has PyYAML (YAML 1.1) readers, where an unquoted `off`
+    # becomes False rather than the approval-mode string.
+    approvals["mode"] = DoubleQuotedScalarString(mode)
+    output = io.StringIO()
+    document.dump(config, output)
+    fd, name = tempfile.mkstemp(prefix=".runtime-defaults-", dir=path.parent)
+    temp = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(output.getvalue())
+            stream.flush()
+            os.fsync(stream.fileno())
+        _permissions(temp, 0o600, uid, gid)
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
 def bootstrap(
     home: Path,
     managed_dir: Path,
@@ -134,6 +173,17 @@ def bootstrap(
     config = yaml.safe_load(seed_path.read_text(encoding="utf-8"))
     config["terminal"]["cwd"] = str(home / "workspace")
     seeded = _seed(home / "config.yaml", yaml.safe_dump(config, sort_keys=False), uid=uid, gid=gid)
+    _seed_execution_defaults(home / "config.yaml", config, uid=uid, gid=gid)
+    workspace = home / "workspace"
+    _safe_path(workspace)
+    workspace.mkdir(exist_ok=True)
+    _permissions(workspace, 0o700, uid, gid)
+    guidance = seed_path.with_name("workspace.md")
+    if guidance.is_file():
+        _seed(workspace / "AGENTS.md", guidance.read_text(encoding="utf-8"), uid=uid, gid=gid)
+    # npm also reads this when MCP/execute_code filter process env vars. The
+    # prefix must be writable even without npm_config_prefix in the child env.
+    _seed(home / ".npmrc", "prefix=${HOME}/.local\ncache=${HOME}/.npm\n", uid=uid, gid=gid)
     _seed(home / ".env", "# Instance-generated credentials only. Supply provider keys in Railway.\n", uid=uid, gid=gid)
     _safe_path(home / ".env")
     values = dotenv_values(home / ".env", interpolate=False)

@@ -1,0 +1,12 @@
+manifest_version: 1
+name: neon
+description: Manage Neon Postgres projects, branches, schemas, and queries.
+source: https://neon.com/docs/ai/neon-mcp-server
+transport:
+  type: http
+  url: https://mcp.neon.tech/mcp
+auth:
+  type: oauth
+post_install: |
+  Use Authenticate in the dashboard MCP page to authorize your Neon account.
+  Append ?projectId=YOUR_PROJECT_ID to the URL to scope it to one project.

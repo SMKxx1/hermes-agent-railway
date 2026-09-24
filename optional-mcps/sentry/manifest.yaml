@@ -1,0 +1,12 @@
+manifest_version: 1
+name: sentry
+description: Investigate application errors, issues, and traces in Sentry.
+source: https://docs.sentry.io/product/sentry-mcp/
+transport:
+  type: http
+  url: https://mcp.sentry.dev/mcp
+auth:
+  type: oauth
+post_install: |
+  Use Authenticate in the dashboard MCP page to authorize your Sentry account.
+  The URL can be scoped to /mcp/ORGANIZATION/PROJECT in the server configuration.
