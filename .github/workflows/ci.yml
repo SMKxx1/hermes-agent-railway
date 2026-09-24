@@ -37,6 +37,12 @@ jobs:
         run: >-
           scripts/run_tests.sh -j 3
           tests/hermes_cli/test_railway_bootstrap.py
+          tests/hermes_cli/test_railway_execution.py
+          tests/hermes_cli/test_mcp_catalog.py
+          tests/hermes_cli/test_mcp_catalog_api.py
+          tests/hermes_cli/test_mcp_config.py
+          tests/hermes_cli/test_mcp_headless.py
+          tests/hermes_cli/test_mcp_security.py
           tests/hermes_cli/test_dashboard_auth_middleware.py
           tests/hermes_cli/test_dashboard_auth_cookies.py
           tests/hermes_cli/test_dashboard_auth_totp_login.py

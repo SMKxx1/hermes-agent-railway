@@ -1,0 +1,14 @@
+manifest_version: 1
+name: git
+description: Inspect diffs, history, branches, and changes in local Git repositories.
+source: https://github.com/modelcontextprotocol/servers/tree/main/src/git
+transport:
+  type: stdio
+  command: uvx
+  args: ["mcp-server-git==2026.8.18"]
+  connect_timeout: 120
+auth:
+  type: none
+post_install: |
+  Pass the repository's absolute path to the Git tools. On Railway, clone
+  repositories inside the persistent workspace so they survive redeploys.

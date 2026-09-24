@@ -39,6 +39,11 @@ The initial model is `openai/gpt-5.4-mini` through OpenRouter. You can choose an
 
 See the [deployment guide](deploy/railway/README.md) for password hashes, custom domains, messaging, backup/recovery, local builds, and the optional [infrastructure recipe](.railway/railway.ts).
 
+The [MCP catalog](optional-mcps/README.md) includes 25 optional server presets,
+including GitHub, Notion, Jira/Confluence, Supabase, Neon, Sentry, Brave Search,
+Firecrawl, Context7, and local filesystem/Git utilities. Agents can install MCPs
+non-interactively and run custom code in the persistent Railway workspace.
+
 ## What is shared and what is yours?
 
 | Shared in this repository | Entered by each owner | Generated privately on `/opt/data` |

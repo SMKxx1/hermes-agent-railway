@@ -52,6 +52,13 @@ ENV HERMES_DASHBOARD=1 \
     HERMES_DASHBOARD_PORT=9119 \
     PORT=9119 \
     S6_BEHAVIOUR_IF_STAGE2_FAILS=2
+# User-installed CLIs and package caches live on the persistent writable volume.
+# The inherited PATH already includes /opt/data/.local/bin.
+ENV npm_config_prefix=/opt/data/.local \
+    npm_config_cache=/opt/data/.npm \
+    UV_CACHE_DIR=/opt/data/.cache/uv \
+    UV_TOOL_DIR=/opt/data/.local/share/uv/tools \
+    UV_TOOL_BIN_DIR=/opt/data/.local/bin
 LABEL org.opencontainers.image.source="${HERMES_SOURCE_URL}" \
       org.opencontainers.image.revision="${HERMES_CUSTOM_REVISION}" \
       org.opencontainers.image.base.name="nousresearch/hermes-agent" \

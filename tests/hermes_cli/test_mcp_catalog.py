@@ -191,6 +191,44 @@ class TestManifestParsing:
 
 
 class TestInstall:
+    def test_headless_missing_credentials_fail_before_bootstrap(self, catalog_dir, monkeypatch):
+        body = _basic_manifest(
+            auth={"type": "api_key", "env": [{"name": "DEMO_KEY"}]},
+            install={"type": "git", "url": "https://example.test/repo.git", "ref": "a" * 40},
+        )
+        _write_manifest(catalog_dir, "demo", body)
+        from hermes_cli import mcp_catalog as mc
+        from hermes_cli.config import load_config
+
+        monkeypatch.setattr(mc, "_do_git_install", lambda *_: pytest.fail("bootstrap ran before credential validation"))
+        monkeypatch.setattr(mc, "_prompt_input", lambda *a, **kw: pytest.fail("headless install prompted"))
+        with pytest.raises(mc.CatalogError, match="Missing required settings: DEMO_KEY"):
+            mc.install_entry(_entry("demo"), non_interactive=True)
+        assert "demo" not in load_config().get("mcp_servers", {})
+
+    def test_declared_inputs_keep_settings_out_of_dotenv(self, catalog_dir, monkeypatch):
+        monkeypatch.setenv("DEMO_KEY", "")  # restore save_env_value's process-env update
+        body = _basic_manifest(auth={"type": "api_key", "env": [
+            {"name": "DEMO_KEY", "secret": True},
+            {"name": "DEMO_URL", "secret": False, "default": "https://example.test"},
+            {"name": "OPTIONAL_KEY", "secret": True, "required": False},
+        ]})
+        _write_manifest(catalog_dir, "demo", body)
+        from hermes_cli.mcp_catalog import install_entry
+        from hermes_cli.config import get_env_path, read_raw_config
+        install_entry(_entry("demo"), non_interactive=True, probe=False, env_values={"DEMO_KEY": "test-secret"})
+        env = read_raw_config()["mcp_servers"]["demo"]["env"]
+        assert env["DEMO_KEY"] == "${DEMO_KEY}"
+        assert env["DEMO_URL"] == "https://example.test"
+        assert "OPTIONAL_KEY" not in env
+        assert "DEMO_URL" not in get_env_path().read_text()
+
+    def test_undeclared_inputs_rejected(self, catalog_dir):
+        _write_manifest(catalog_dir, "demo", _basic_manifest())
+        from hermes_cli.mcp_catalog import CatalogError, install_entry
+        with pytest.raises(CatalogError, match="Undeclared catalog settings"):
+            install_entry(_entry("demo"), non_interactive=True, env_values={"OTHER_TOKEN": "secret"})
+
     def test_install_simple_stdio_writes_config(self, catalog_dir):
         _write_manifest(catalog_dir, "demo", _basic_manifest())
         from hermes_cli.mcp_catalog import install_entry
@@ -223,7 +261,7 @@ class TestInstall:
         from hermes_cli.mcp_catalog import install_entry
         from hermes_cli.config import get_env_value, load_config
 
-        install_entry(_entry("demo"), enable=True)
+        install_entry(_entry("demo"), enable=True, non_interactive=False)
 
         assert get_env_value("DEMO_KEY") == "secret-val"
         assert "demo" in load_config()["mcp_servers"]
@@ -245,7 +283,7 @@ class TestInstall:
         from hermes_cli.mcp_catalog import install_entry
         from hermes_cli.config import load_config
 
-        install_entry(_entry("demo"), enable=True)
+        install_entry(_entry("demo"), enable=True, non_interactive=False)
 
         server = load_config()["mcp_servers"]["demo"]
         assert server["url"] == "https://mcp.example.com/sse"
@@ -325,6 +363,18 @@ class TestPicker:
 
 
 class TestToolSelection:
+    @pytest.mark.parametrize("prior", [[], ["beta"]])
+    @pytest.mark.parametrize("probe", [False, True])
+    def test_unreachable_reinstall_preserves_prior_selection(self, catalog_dir, prior, probe):
+        _write_manifest(catalog_dir, "demo", _basic_manifest(tools={"default_enabled": ["alpha"]}))
+        from hermes_cli.config import load_config, save_config
+        from hermes_cli.mcp_catalog import install_entry
+        cfg = load_config()
+        cfg["mcp_servers"] = {"demo": {"command": "npx", "tools": {"include": prior}}}
+        save_config(cfg)
+        install_entry(_entry("demo"), non_interactive=True, probe=probe)
+        assert load_config()["mcp_servers"]["demo"]["tools"]["include"] == prior
+
     def _make_probed(self, *names):
         """Return a list of (tool_name, description) tuples for mocking."""
         return [(n, f"description of {n}") for n in names]

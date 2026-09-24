@@ -58,7 +58,9 @@ def build_mcp_parser(subparsers, *, cmd_mcp: Callable) -> None:
         default=[],
         help="Arguments for stdio command; must be the last option",
     )
-    mcp_add_p.add_argument("--auth", choices=["oauth", "header"], help="Auth method")
+    mcp_add_p.add_argument("--auth", choices=["oauth", "header", "none"], help="Auth method")
+    mcp_add_p.add_argument("-y", "--yes", action="store_true", help="Skip prompts, enable all tools, and allow replacing an existing entry")
+    mcp_add_p.add_argument("--no-probe", action="store_true", help="Save the connection without starting or contacting the server")
     mcp_add_p.add_argument("--preset", help="Known MCP preset name")
     mcp_add_p.add_argument(
         "--connect-timeout",
@@ -104,14 +106,14 @@ def build_mcp_parser(subparsers, *, cmd_mcp: Callable) -> None:
         help="Re-authenticate every OAuth server in config, one at a time",
     )
 
-    # ── Catalog (Nous-approved MCPs shipped with the repo) ─────────────────
+    # ── Catalog (MCP presets shipped with this distribution) ──────────────
     mcp_sub.add_parser(
         "picker",
         help="Interactive catalog picker (also the default for `hermes mcp`)",
     )
     mcp_sub.add_parser(
         "catalog",
-        help="List Nous-approved MCPs available for one-click install",
+        help="List bundled MCP presets available for one-click install",
     )
     mcp_install_p = mcp_sub.add_parser(
         "install",
@@ -121,6 +123,10 @@ def build_mcp_parser(subparsers, *, cmd_mcp: Callable) -> None:
         "identifier",
         help="Catalog entry name (or `official/<name>`)",
     )
+    mcp_install_p.add_argument("-y", "--yes", action="store_true", help="Use saved credentials and default tools without prompting")
+    mcp_install_p.add_argument("--no-probe", action="store_true", help="Install configuration without starting or contacting the server")
+    mcp_install_p.add_argument("--disabled", action="store_true", help="Install without enabling the server")
+    mcp_install_p.add_argument("--env", action="append", default=[], metavar="KEY=VALUE", help="Supply a declared catalog setting (repeatable); prefer saved credentials for secrets")
 
     add_accept_hooks_flag(mcp_parser)
     mcp_parser.set_defaults(func=cmd_mcp)

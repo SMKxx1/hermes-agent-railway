@@ -1,0 +1,12 @@
+manifest_version: 1
+name: atlassian
+description: Search and manage Jira issues and Confluence content with Rovo.
+source: https://github.com/atlassian/atlassian-mcp-server
+transport:
+  type: http
+  url: https://mcp.atlassian.com/v2/mcp
+auth:
+  type: oauth
+post_install: |
+  Use Authenticate in the dashboard MCP page. Your Atlassian organization
+  must allow the Rovo MCP integration. Then start a new Hermes session.

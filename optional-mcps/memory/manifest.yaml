@@ -1,0 +1,16 @@
+manifest_version: 1
+name: memory
+description: Store entities, relationships, and observations in a knowledge graph.
+source: https://github.com/modelcontextprotocol/servers/tree/main/src/memory
+transport:
+  type: stdio
+  command: npx
+  args: ["-y", "@modelcontextprotocol/server-memory@2026.8.31"]
+  connect_timeout: 120
+  env:
+    MEMORY_FILE_PATH: "${HERMES_HOME}/mcp-memory.jsonl"
+auth:
+  type: none
+post_install: |
+  The knowledge graph is stored in mcp-memory.jsonl in the active Hermes home,
+  so it survives Railway redeploys. This is separate from Hermes' built-in memory.

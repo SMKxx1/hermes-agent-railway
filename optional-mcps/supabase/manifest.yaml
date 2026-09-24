@@ -1,0 +1,12 @@
+manifest_version: 1
+name: supabase
+description: Work with Supabase databases, projects, functions, and development tools.
+source: https://supabase.com/docs/guides/ai-tools/mcp
+transport:
+  type: http
+  url: https://mcp.supabase.com/mcp
+auth:
+  type: oauth
+post_install: |
+  Use Authenticate in the dashboard MCP page to authorize Supabase access.
+  Append ?project_ref=YOUR_PROJECT_REF to the URL to scope it to one project.

@@ -1,0 +1,9 @@
+manifest_version: 1
+name: deepwiki
+description: Read documentation and ask questions about public GitHub repositories.
+source: https://docs.devin.ai/work-with-devin/deepwiki-mcp
+transport:
+  type: http
+  url: https://mcp.deepwiki.com/mcp
+auth:
+  type: none

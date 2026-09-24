@@ -205,6 +205,53 @@ for name in ('.op.env', '.anthropic_oauth.json'):
 """)
 
 
+def test_agent_can_install_and_run_code_and_custom_mcp(instance):
+    name, _ = instance
+    docker("exec", "-u", "hermes", "-e", "HOME=/opt/data", name,
+           "/opt/hermes/.venv/bin/python", "-c", r'''
+import json, os, subprocess, sys
+from pathlib import Path
+from tools.approval import set_current_session_key, reset_current_session_key
+from tools.code_execution_tool import execute_code
+
+workspace = Path('/opt/data/workspace/runtime-contract')
+workspace.mkdir()
+assert os.getuid() != 0
+os.environ['HERMES_GATEWAY_SESSION'] = '1'
+token = set_current_session_key('api_server:runtime-contract')
+try:
+    result = json.loads(execute_code("print(sum(range(11)))", task_id='runtime-contract'))
+finally:
+    reset_current_session_key(token)
+assert result['status'] == 'success', result
+assert result['output'].strip() == '55'
+
+def run(*args):
+    p = subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=40)
+    assert p.returncode == 0, p.stdout + p.stderr
+    return p.stdout
+
+run('uv', 'venv', '--python', '/usr/bin/python3.13', '--no-python-downloads', str(workspace / '.venv'))
+assert run(str(workspace / '.venv/bin/python'), '-c', "print('custom-python')").strip() == 'custom-python'
+package = workspace / 'node-cli'
+package.mkdir()
+(package / 'package.json').write_text(json.dumps({
+    'name': 'hermes-runtime-contract-cli', 'version': '1.0.0',
+    'bin': {'hermes-runtime-contract-cli': 'cli.js'},
+}))
+(package / 'cli.js').write_text("#!/usr/bin/env node\nconsole.log('custom-node');\n")
+run('npm', 'install', '--global', '--offline', '--no-audit', '--no-fund', '--ignore-scripts', str(package))
+assert run('hermes-runtime-contract-cli').strip() == 'custom-node'
+
+server = workspace / 'server.py'
+server.write_text("from mcp.server.fastmcp import FastMCP\nm=FastMCP('custom')\n@m.tool()\ndef hello()->str:\n return 'hello'\nm.run()\n")
+output = run(sys.executable, '-m', 'hermes_cli.main', 'mcp', 'add', 'runtime-contract',
+             '--yes', '--command', sys.executable, '--args', str(server))
+assert 'Saved' in output, output
+assert 'hello' in run(sys.executable, '-m', 'hermes_cli.main', 'mcp', 'test', 'runtime-contract')
+''', timeout=120)
+
+
 def test_config_migration_failure_stops_services(railway_image, tmp_path):
     name = 'hermes-public-migration-' + uuid.uuid4().hex[:12]
     failure = tmp_path / 'migration-failure.py'

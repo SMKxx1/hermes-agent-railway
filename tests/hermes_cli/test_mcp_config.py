@@ -175,6 +175,11 @@ class TestMcpRemove:
 
 class TestMcpAdd:
 
+    @pytest.fixture(autouse=True)
+    def interactive_input(self, monkeypatch):
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+
     def test_add_http_server_all_tools(self, tmp_path, capsys, monkeypatch):
         """Add an HTTP server, accept all tools."""
         fake_tools = [

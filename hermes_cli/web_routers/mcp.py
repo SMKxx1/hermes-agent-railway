@@ -387,7 +387,7 @@ async def set_mcp_server_enabled(
 
 @router.get("/api/mcp/catalog")
 async def list_mcp_catalog(profile: Optional[str] = None):
-    """Browse the Nous-approved MCP catalog (the optional-mcps/ manifests).
+    """Browse the bundled MCP catalog (the optional-mcps/ manifests).
 
     Each entry reports whether it's already installed and enabled so the UI
     can show install / enabled state inline.  This is the same catalog
@@ -470,8 +470,8 @@ async def list_mcp_catalog(profile: Optional[str] = None):
 async def install_mcp_catalog_entry(body: MCPCatalogInstall, profile: Optional[str] = None):
     """Install a catalog MCP into config.yaml.
 
-    For HTTP/stdio entries with required env vars, those are written to .env
-    via the standard env path so the agent can read them at session start.
+    Declared secrets use the standard .env path; non-secret settings go to
+    the server's config. This endpoint never prompts or probes a server.
     Entries that need a git bootstrap (``needs_install``) are installed via
     the CLI action path because the clone can take time.
     """
@@ -482,31 +482,38 @@ async def install_mcp_catalog_entry(body: MCPCatalogInstall, profile: Optional[s
     if entry is None:
         raise HTTPException(status_code=404, detail=f"No catalog entry '{name}'")
 
-    # Persist any supplied env vars first (catalog entries declare which names
-    # they need; we only write the ones the user provided).
     effective_profile = body.profile or profile
-    if body.env:
-        def _write_env():
-            with _profile_scope(effective_profile):
-                for k, v in body.env.items():
-                    if v:
-                        save_env_value(k, v)
-
-        await asyncio.to_thread(_write_env)
 
     # Git-bootstrap entries can take a while to clone — run via the background
     # action path so the request returns immediately and the UI can tail logs.
     # The -p subprocess rebinds HERMES_HOME-derived paths in the child.
     if entry.install is not None:
+        def _prepare():
+            with _profile_scope(effective_profile):
+                prior_env = (mcp_catalog.installed_servers().get(entry.name) or {}).get("env") or {}
+                return mcp_catalog._prompt_env_vars(
+                    entry.auth.env, non_interactive=True,
+                    values=body.env, prior_env=prior_env,
+                )
+
+        try:
+            values = await asyncio.to_thread(_prepare)
+        except mcp_catalog.CatalogError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        argv = _profile_cli_args(effective_profile) + ["mcp", "install", entry.name, "--yes", "--no-probe"]
+        if not body.enable:
+            argv.append("--disabled")
+        # Credentials are already in the profile/managed .env. Only non-secret
+        # settings may appear in the background process's command line.
+        for spec in entry.auth.env:
+            if not spec.secret and spec.name in values:
+                argv.extend(["--env", f"{spec.name}={values[spec.name]}"])
         # Unique per-entry action name: a shared "mcp-install" would let a
         # re-click (or a second entry) overwrite the tracked process/log while
         # the first clone is still running.
-        action = _mcp_install_action_name(name)
+        action = _mcp_install_action_name(entry.name)
         try:
-            _spawn_hermes_action(
-                _profile_cli_args(effective_profile) + ["mcp", "install", name],
-                action,
-            )
+            _spawn_hermes_action(argv, action)
         except HTTPException:
             raise
         except Exception as exc:
@@ -521,7 +528,11 @@ async def install_mcp_catalog_entry(body: MCPCatalogInstall, profile: Optional[s
     # setting it here works; keep it explicit for clarity).
     def _install_scoped():
         with _profile_scope(effective_profile):
-            mcp_catalog.install_entry(entry, enable=body.enable)
+            with _CONFIG_MUTATION_LOCK:
+                mcp_catalog.install_entry(
+                    entry, enable=body.enable, non_interactive=True,
+                    probe=False, env_values=body.env,
+                )
 
     try:
         await asyncio.to_thread(_install_scoped)

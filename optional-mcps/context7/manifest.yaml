@@ -1,0 +1,17 @@
+manifest_version: 1
+name: context7
+description: Find current library documentation and version-specific code examples.
+source: https://github.com/upstash/context7
+transport:
+  type: http
+  url: https://mcp.context7.com/mcp
+auth:
+  type: api_key
+  env:
+    - name: MCP_CONTEXT7_API_KEY
+      prompt: Context7 API key
+      required: true
+      secret: true
+post_install: |
+  Obtain an API key from https://context7.com/dashboard and supply it through
+  Railway or the catalog credential form.

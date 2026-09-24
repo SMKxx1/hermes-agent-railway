@@ -51,11 +51,11 @@ List the files in /home/user/projects and summarize the repo structure.
 
 Hermes will discover the MCP server's tools and use them like any other tool.
 
-## Catalog: one-click install for Nous-approved MCPs
+## Catalog: one-click install for bundled MCPs
 
-Hermes ships a curated catalog of MCP servers that Nous staff has reviewed
-and merged. They're disabled by default — install only what you actually
-want.
+This distribution ships upstream Hermes catalog entries and additional MCP
+presets. They are disabled by default. See `optional-mcps/README.md` for the
+distribution's catalog and each manifest's `source` for provider documentation.
 
 ```bash
 hermes mcp                # interactive picker (default)
@@ -73,22 +73,36 @@ github       installed (disabled)   GitHub repo + PR tools
 
 Hit `Enter` on a row to install (and walk through any required credentials),
 enable, disable, or uninstall. Catalog entries are stored under
-`optional-mcps/` in the hermes-agent repo — presence in that directory means
-Nous approval. There is no community submission tier; entries are added by
-merging a PR.
+`optional-mcps/` in the repository. Additional presets in this distribution do
+not imply Nous Research endorsement.
 
 Catalog entries can require:
 
 - **API key** — Hermes prompts at install time and writes the value to
-  `~/.hermes/.env`. Non-secret values (base URLs) go to the same file.
+  `~/.hermes/.env`. Non-secret values (base URLs) go to the server's
+  `mcp_servers.<name>.env` block in `config.yaml`. Only declared credentials
+  are forwarded to stdio subprocesses.
 - **OAuth** (remote MCP) — written as `auth: oauth` in your config; the MCP
   client opens a browser on first connection.
 - **OAuth** (third-party provider like Google/GitHub) — Hermes points you at
   `hermes auth <provider>` if you haven't authenticated already.
 
+### Non-interactive setup
+
+Agents and scripts can use `hermes mcp install NAME --yes` or
+`hermes mcp add NAME --yes --command COMMAND --args ARGS`. Required credentials
+must already be configured or supplied through the catalog form. Declared
+settings can also be supplied with `--env KEY=VALUE` on catalog installs.
+Headless commands never wait for terminal prompts. Use `--no-probe` to save
+configuration without connecting, and `hermes mcp test NAME` to check it later.
+
+OAuth setup is saved without opening a browser during headless installation.
+On Railway, use **Authenticate** on the dashboard MCP page to complete sign-in
+via the public callback. Start a new conversation to load the configured tools.
+
 ### Tool selection at install time
 
-After credentials are configured, Hermes probes the MCP server to list every
+During interactive CLI installation, Hermes probes the MCP server to list every
 tool it exposes and presents a checklist:
 
 ```
@@ -112,18 +126,17 @@ Submit the checklist with ENTER. Only the checked tools end up in
 `mcp_servers.<name>.tools.include`. If you select everything, no filter is
 written (cleanest config shape, identical behavior).
 
-**If the probe fails** (server unreachable, OAuth not yet completed,
-backing service not running), the install still succeeds: the manifest's
-`tools.default_enabled` is applied directly (if declared), or no filter is
-written (if not). Re-run `hermes mcp configure <name>` once the server is
-reachable to refine.
+**If the probe fails or is skipped** (server unreachable, OAuth not yet completed,
+dashboard installation, or `--no-probe`), the catalog configuration is still
+saved: your prior selection is preserved, otherwise the manifest's
+`tools.default_enabled` is applied if declared, or no filter is written.
+Re-run `hermes mcp configure <name>` once the server is reachable to refine.
 
 ### Trust model
 
 Installing a catalog entry runs whatever the manifest specifies — `git clone`,
 the entry's `bootstrap` commands (`pip install`, `npm install`, etc.), and
-ultimately the MCP server's own code. Manifests are gated by PR review into
-the hermes-agent repo, so Nous has reviewed each entry before it shipped —
+ultimately the MCP server's own code. Manifests are maintained in this repository —
 **but you should still read the manifest before installing**, especially the
 `source:` field's repository, the `install.bootstrap:` commands, and any
 `transport.command:` invocation.

@@ -155,13 +155,71 @@ ambiguous enrollment automatically.
 
 `deploy/railway/defaults.yaml` contains shared first-boot settings. It seeds
 OpenRouter with `openai/gpt-5.4-mini`, a local terminal backend rooted at
-`/opt/data/workspace`, and loopback-only API-server wiring. Existing
-`/opt/data/config.yaml` is preserved on restart. Change the provider and model
+`/opt/data/workspace`, unattended code execution (`approvals.mode: "off"`),
+and loopback-only API-server wiring. Existing settings are preserved on restart;
+the execution mode is filled in only if it is absent. Change the provider and model
 from the dashboard, then keep the corresponding provider key in Railway.
 
 The source tree remains a full Hermes fork. The custom model-orchestration and
 research code is removed from this public deployment, while the native Hermes
 agent framework and its built-in `delegate_task` capability remain available.
+
+## MCP servers and custom code
+
+The [bundled catalog](../../optional-mcps/README.md) includes 25 presets for
+development, search, documentation, workspaces, databases, and creative tools.
+Browse them in the dashboard's **MCP** page or with `hermes mcp catalog`.
+
+Agents can install servers directly through their terminal:
+
+```bash
+hermes mcp install time --yes
+hermes mcp install github --yes
+hermes mcp add my-server --yes --command python --args /opt/data/workspace/server.py
+hermes mcp test my-server
+```
+
+Supply required API keys in Railway service variables or the catalog form.
+Railway-managed keys must be changed in Railway. For example, GitHub's preset
+uses `MCP_GITHUB_API_KEY`, while Brave Search uses `BRAVE_API_KEY`. Catalog
+credentials are forwarded only to the server that declares them. Non-secret
+settings such as n8n's URL go to the server's `config.yaml` entry:
+
+```bash
+hermes mcp install n8n --yes --env N8N_BASE_URL=https://n8n.example.com
+```
+
+The installer handles non-interactive agent commands without terminal prompts.
+Missing inputs and failed custom-server connections return errors. `--no-probe`
+can save a connection before the service is reachable. OAuth installation saves
+the connection; finish authorization using **Authenticate** in the dashboard's
+MCP page. This uses the public dashboard callback instead of the container's
+localhost. Start a new conversation after setup to load the tools.
+
+Custom Python, JavaScript, and shell code runs inside the Railway container as
+the `hermes` user. Put projects and virtual environments in `/opt/data/workspace`
+so they survive deployments. Python project dependencies can be installed with:
+
+```bash
+cd /opt/data/workspace/my-project
+uv venv .venv
+uv pip install --python .venv/bin/python PACKAGE
+.venv/bin/python script.py
+```
+
+Use `npm install` inside a JavaScript project or `npm install -g PACKAGE` for a
+CLI. Global npm binaries use `/opt/data/.local/bin`, already on `PATH`, and npm/uv
+caches persist on the volume. The workspace gets an initial `AGENTS.md` with this
+runtime and MCP guidance; an existing workspace instruction file is preserved.
+
+If an older volume already has an explicit `approvals.mode: smart` or `manual`,
+switch it once in the dashboard configuration or run this over Railway SSH:
+
+```bash
+hermes config set approvals.mode off
+```
+
+The bootstrap preserves explicit owner choices across subsequent restarts.
 
 ## Build locally
 
