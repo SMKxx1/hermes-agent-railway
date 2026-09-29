@@ -32,7 +32,12 @@ state = json.loads(state_path.read_text())
 code = 0
 if method == "PUT":
     workflow_id = int(path.split("/")[1])
-    next(w for w in state["workflows"] if w["id"] == workflow_id)["state"] = "disabled_manually"
+    workflow = next(w for w in state["workflows"] if w["id"] == workflow_id)
+    if "disable_error" in workflow:
+        workflow["state"] = workflow["disable_error"]
+        code = 1
+    else:
+        workflow["state"] = "disabled_manually"
 elif method == "POST":
     run_id = int(path.split("/")[1])
     run = next(r for r in state["runs"] if r["id"] == run_id)
@@ -48,6 +53,13 @@ else:
     elif path == "runs":
         status = parse_qs(url.query)["status"][0]
         key, records = "workflow_runs", [r for r in state["runs"] if r["status"] == status]
+    elif path.startswith("workflows/"):
+        workflow_id = int(path.split("/")[1])
+        workflow = next(w for w in state["workflows"] if w["id"] == workflow_id)
+        if workflow.get("get_error"):
+            # Even a read that prints an inactive state must not hide its failure.
+            code = 1
+        key, records = None, [workflow]
     else:
         run_id = int(path.split("/")[1])
         key, records = None, [next(r for r in state["runs"] if r["id"] == run_id)]
@@ -134,3 +146,27 @@ def test_guard_only_ignores_cancel_errors_when_the_run_already_finished(tmp_path
         "cancel_error": status,
     }]})
     assert (result.returncode == 0) == (status == "completed"), result.stderr
+
+
+@pytest.mark.platforms("linux", "macos")
+@pytest.mark.parametrize("state_after_error,get_error,accepted", [
+    ("disabled_manually", False, True),
+    ("disabled_inactivity", False, True),
+    ("disabled_fork", False, True),
+    ("deleted", False, True),
+    ("active", False, False),
+    ("unexpected", False, False),
+    (None, False, False),
+    ("disabled_manually", True, False),
+])
+def test_guard_only_ignores_disable_errors_after_confirming_inactive_state(
+    tmp_path, state_after_error, get_error, accepted,
+):
+    path = ".github/workflows/upstream.yml"
+    result, state = _run_guard(tmp_path, {"workflows": [{
+        "id": 1, "path": path, "state": "active",
+        "disable_error": state_after_error, "get_error": get_error,
+    }], "runs": [{"id": 2, "path": path, "status": "queued"}]})
+    assert (result.returncode == 0) is accepted, result.stderr
+    # A benign race must still reach the sweep for runs queued before disable.
+    assert state["runs"][0].get("cancelled", False) is accepted
