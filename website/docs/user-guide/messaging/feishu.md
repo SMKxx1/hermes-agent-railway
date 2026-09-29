@@ -132,7 +132,7 @@ FEISHU_WEBHOOK_PORT=8765         # default: 8765
 FEISHU_WEBHOOK_PATH=/feishu/webhook  # default: /feishu/webhook
 ```
 
-When Feishu sends a URL verification challenge (`type: url_verification`), the webhook responds automatically so you can complete the subscription setup in the Feishu developer console. The challenge response is gated on `FEISHU_VERIFICATION_TOKEN` when set — challenge requests with a missing or mismatched token are rejected so an unauthenticated remote cannot prove endpoint control by echoing attacker-controlled challenge data.
+When Feishu sends a URL verification challenge (`type: url_verification`), the webhook responds automatically so you can complete the subscription setup in the Feishu developer console. URL verification requires `FEISHU_VERIFICATION_TOKEN` to be configured and the challenge to contain a matching token. This also applies when `FEISHU_ENCRYPT_KEY` is configured, because URL verification is unsigned. Ordinary signed events continue to support encrypt-key-only authentication.
 
 ## Step 3: Configure Hermes
 
@@ -202,13 +202,13 @@ When running in webhook mode, set an encryption key to enable signature verifica
 FEISHU_ENCRYPT_KEY=your-encrypt-key
 ```
 
-This key is found in the **Event Subscriptions** section of your Feishu app configuration. When set, the adapter verifies every webhook request using the signature algorithm:
+This key is found in the **Event Subscriptions** section of your Feishu app configuration. When set, the adapter verifies ordinary webhook events using the signature algorithm:
 
 ```
 SHA256(timestamp + nonce + encrypt_key + body)
 ```
 
-The computed hash is compared against the `x-lark-signature` header using timing-safe comparison. Requests with invalid or missing signatures are rejected with HTTP 401.
+The computed hash is compared against the `x-lark-signature` header using timing-safe comparison. Ordinary events with invalid or missing signatures are rejected with HTTP 401. Unsigned URL verification challenges instead require a matching verification token.
 
 :::tip
 In WebSocket mode, signature verification is handled by the SDK itself, so `FEISHU_ENCRYPT_KEY` is optional. In webhook mode, it is strongly recommended for production.
@@ -222,7 +222,7 @@ An additional layer of authentication that checks the `token` field inside webho
 FEISHU_VERIFICATION_TOKEN=your-verification-token
 ```
 
-This token is also found in the **Event Subscriptions** section of your Feishu app. When set, every inbound webhook payload must contain a matching `token` in its `header` object. Mismatched tokens are rejected with HTTP 401.
+This token is also found in the **Event Subscriptions** section of your Feishu app. When configured, every inbound webhook payload must contain a matching `token` in its `header` object or at the top level. It is required for URL verification. Missing or mismatched tokens are rejected with HTTP 401.
 
 Both `FEISHU_ENCRYPT_KEY` and `FEISHU_VERIFICATION_TOKEN` can be used together for defense in depth.
 
@@ -468,15 +468,15 @@ Messages within the same chat are processed serially (one at a time) to maintain
 
 In webhook mode, the adapter enforces per-IP rate limiting to protect against abuse:
 
-- **Window:** 60-second sliding window
-- **Limit:** 120 requests per window per (app_id, path, IP) triple
+- **Window:** 60-second fixed window
+- **Limit:** 120 authenticated requests per window per (app_id, path, IP) triple
 - **Tracking cap:** Up to 4096 unique keys tracked (prevents unbounded memory growth)
 
-Requests that exceed the limit receive HTTP 429 (Too Many Requests).
+Authenticated requests that exceed the limit receive HTTP 429 (Too Many Requests). Invalid bodies, tokens, and signatures do not consume this quota, so unauthenticated traffic cannot exhaust the delivery budget of legitimate callbacks sharing a reverse proxy address. Body size and read-time limits still apply before authentication. Network-level flood protection belongs at the ingress; an application quota shared by unauthenticated and authenticated requests would recreate the same denial of service.
 
 ### Webhook Anomaly Tracking
 
-The adapter tracks consecutive error responses per IP address. After 25 consecutive errors from the same IP within a 6-hour window, a warning is logged. This helps detect misconfigured clients or probing attempts.
+The adapter tracks consecutive error responses per IP address, capped at 4096 addresses. After 25 consecutive errors from the same IP within a 6-hour window, a warning is logged. At capacity, expired entries are pruned at most once a minute; new addresses are not tracked until space is available. Error responses continue normally. This helps detect misconfigured clients or probing attempts without allowing anonymous traffic to grow the tracker indefinitely.
 
 Additional webhook protections:
 - **Body size limit:** 1 MB maximum
