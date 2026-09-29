@@ -66,16 +66,26 @@ def invalidate_managed_cache() -> None:
         _ENV_CACHE.clear()
 
 
-def _cached_read(path: Path, cache: Dict[str, tuple], parse):
+def _cached_read(path: Path, cache: Dict[str, tuple], parse, *, strict: bool = False):
     """Shared stat-signature-keyed read; returns a deepcopy of the parsed value.
 
-    ``None`` when the file is absent or fails to parse (fail-open). A parse failure is logged
-    LOUDLY — the admin needs to know their policy isn't applied — but never raises, so a malformed
-    managed file can't brick startup.
+    ``None`` when the file is absent or fails to parse (fail-open by default). A parse failure
+    is logged loudly. Authorization consumers opt into strict errors instead of fallback.
     """
     try:
         st = path.stat()
+    except FileNotFoundError:
+        # A previously observed policy disappearing must not become unrestricted.
+        if strict:
+            with _CACHE_LOCK:
+                if str(path) in cache:
+                    raise ValueError("Previously loaded managed configuration is missing")
+        # In strict mode distinguish a never-present file from an existing YAML
+        # null/empty document, which parses as None and is not an authorization map.
+        return {} if strict else None
     except OSError:
+        if strict:
+            raise
         return None  # absent
     key = file_signature(st)
     path_key = str(path)
@@ -86,6 +96,8 @@ def _cached_read(path: Path, cache: Dict[str, tuple], parse):
     try:
         parsed = parse(path)
     except Exception as exc:  # noqa: BLE001 — fail-open, but LOUD
+        if strict:
+            raise
         logger.warning(
             "managed scope: failed to parse %s: %s — IGNORING this managed file. "
             "Admin policy from this file is NOT being applied. Fix and restart.",
@@ -96,17 +108,29 @@ def _cached_read(path: Path, cache: Dict[str, tuple], parse):
     return parsed
 
 
-def _load_managed_file(name: str, cache: Dict[str, tuple], parse) -> dict:
+def _load_managed_file(name: str, cache: Dict[str, tuple], parse, *, strict: bool = False) -> dict:
     managed_dir = get_managed_dir()
     if managed_dir is None:
+        if strict:
+            with _CACHE_LOCK:
+                seen_default = str(_DEFAULT_MANAGED_DIR / name) in cache
+            if os.environ.get("HERMES_MANAGED_DIR", "").strip() or seen_default:
+                raise ValueError("Configured managed directory is unavailable")
         return {}
-    parsed = _cached_read(managed_dir / name, cache, parse)
+    parsed = _cached_read(managed_dir / name, cache, parse, strict=strict)
+    if strict and not isinstance(parsed, dict):
+        raise ValueError("Managed configuration must be a mapping")
     return parsed if isinstance(parsed, dict) else {}
 
 
-def load_managed_config() -> dict:
-    """Parsed managed config.yaml, or {} when absent/malformed (fail-open)."""
-    return _load_managed_file("config.yaml", _CONFIG_CACHE, lambda p: fast_safe_load(p.read_text(encoding="utf-8-sig")) or {})
+def load_managed_config(*, strict: bool = False) -> dict:
+    """Parsed managed config.yaml. ``strict=True`` raises on read/parse errors for
+    authorization consumers; otherwise absent/malformed config returns {} as before.
+    A never-present file is absent, but losing a previously loaded file is an error.
+    """
+    return _load_managed_file(
+        "config.yaml", _CONFIG_CACHE,
+        lambda p: fast_safe_load(p.read_text(encoding="utf-8-sig")), strict=strict)
 
 
 def load_managed_env() -> Dict[str, str]:

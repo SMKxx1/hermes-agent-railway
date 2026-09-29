@@ -35,6 +35,7 @@ jobs:
           tests/ci/test_railway_workflow_guard.py
           tests/scripts/ci/test_audit_python_lock.py
           tests/hermes_cli/test_railway_bootstrap.py
+          tests/hermes_cli/test_railway_auth_modes.py
           tests/hermes_cli/test_railway_execution.py
           tests/hermes_cli/test_mcp_catalog.py
           tests/hermes_cli/test_mcp_config.py
@@ -42,6 +43,7 @@ jobs:
           tests/hermes_cli/test_dashboard_auth_middleware.py
           tests/hermes_cli/test_dashboard_auth_cookies.py
           tests/hermes_cli/test_dashboard_auth_gate.py
+          tests/hermes_cli/test_dashboard_auth_managed_policy.py
           tests/hermes_cli/test_dashboard_auth_password_login.py
           tests/hermes_cli/test_dashboard_auth_totp_login.py
           tests/hermes_cli/test_web_server_files.py
@@ -51,6 +53,7 @@ jobs:
           tests/gateway/test_railway_qwen_stt.py
           tests/hermes_cli/test_sessions_export_md_cli.py
           tests/plugins/dashboard_auth/test_totp_provider.py
+          tests/plugins/dashboard_auth/test_self_hosted_provider.py
 
   railway-image-contract:
     name: Railway image contract
