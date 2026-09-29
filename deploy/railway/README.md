@@ -219,6 +219,12 @@ The bootstrap preserves explicit owner choices across subsequent restarts.
 
 ## Build locally
 
+The build pins the upstream image and its source revision together, then rebuilds
+the Python environment, dashboard, TUI, and Photon sidecar from this checkout's
+lockfiles. This allows reviewed dependency security fixes to reach the deployed
+runtime before upstream publishes them. Old dependency trees and compiled assets
+are replaced, so updating a lockfile cannot leave the inherited version in use.
+
 The image records `RAILWAY_GIT_COMMIT_SHA` when Railway supplies it. For a
 local build, the revision argument is optional:
 

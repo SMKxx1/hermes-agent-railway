@@ -19,9 +19,11 @@ let
 
     postPatch = ''
       ln -s ${./node-gyp-11-4-0-package-lock.json} package-lock.json
+      # Mocha 11 has no release with patched diff/serialize-javascript ranges.
+      node -e 'const fs = require("fs"); const manifest = JSON.parse(fs.readFileSync("package.json")); manifest.overrides = JSON.parse(fs.readFileSync("${./node-gyp-11-4-0-overrides.json}")); fs.writeFileSync("package.json", JSON.stringify(manifest));'
     '';
 
-    npmDepsHash = "sha256-P25m02VxIXkPD7rYI2Wki9+levrtNg2xk8pU+nEUXsE=";
+    npmDepsHash = "sha256-EdDcUgS/ItLDNC51LJ90v0PGiydD+otXTn9d2UQmtqw=";
 
     npmDepsFetcherVersion = 2;
 

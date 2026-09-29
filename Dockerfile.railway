@@ -1,12 +1,11 @@
 # syntax=docker/dockerfile:1.7
-# Railway distribution image: a thin layer on the upstream image built from the upstream
-# commit this branch last merged (its org.opencontainers.image.revision label). The toolchain,
-# Python environment, s6 supervision and the prebuilt dashboard/TUI come from that image
-# unchanged; this layer adds the distribution's source and Railway defaults. The distribution
-# keeps upstream's dependency locks, so the base image's environment matches this source.
+# Railway distribution image on the upstream image built from the upstream commit this branch
+# last merged (its org.opencontainers.image.revision label). Keep its pinned toolchain and s6
+# supervision, but rebuild dependencies and frontends from this checkout's locks so temporary
+# security fixes also reach the installed runtime, not only the copied manifests.
 # upstream-sync.yml moves the digest and the merged upstream commit together.
 ARG HERMES_BASE=nousresearch/hermes-agent@sha256:45666f35ffa4102e1233ad6df41ccb548a0e4425063f89901117e7e84f74e54a
-FROM ${HERMES_BASE}
+FROM ${HERMES_BASE} AS railway-base
 USER root
 WORKDIR /opt/hermes
 
@@ -18,13 +17,47 @@ RUN test -n "$DEBIAN_SECURITY_REFRESH" && apt-get update \
     && apt-get upgrade -y --no-install-recommends \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# PM builds a fresh sealed environment with the same extras as upstream's production image.
+# Cache this stage independently of source edits; never mutate the inherited managed venv.
+FROM railway-base AS railway-python
+COPY pyproject.toml uv.lock ./
+RUN rm -rf /opt/hermes/.venv \
+    && HERMES_HOME=/tmp/railway-python-build python3 -m pm.build_env \
+        --source /opt/hermes --python /usr/local/bin/python3 \
+        --out /opt/hermes/.venv --no-install-project --sealed \
+        --extra all --extra messaging --extra otlp --extra anthropic --extra bedrock \
+        --extra azure-identity --extra matrix --extra google-chat
+
+# Build tools stay in this stage. The final image receives only compiled products and tsc.
+FROM railway-base AS railway-frontend
+COPY --link --chmod=a+rX,go-w . /opt/hermes/
+ENV npm_config_install_links=false
+RUN node scripts/build/node-deps.mjs --source /opt/hermes --workspace ui-tui --workspace web \
+    && /opt/hermes/.venv/bin/python -I scripts/generate_icons.py --source /opt/hermes --out /tmp/hermes-icons \
+    && node scripts/build/tui.mjs --source /opt/hermes --out /opt/products/tui \
+    && node scripts/build/web.mjs --source /opt/hermes --icons /tmp/hermes-icons --out /opt/products/web
+
+FROM railway-base AS runtime
 ARG RAILWAY_GIT_COMMIT_SHA
 ARG HERMES_CUSTOM_REVISION=${RAILWAY_GIT_COMMIT_SHA:-unversioned-source-build}
 ARG HERMES_SOURCE_URL
 
-# Same source step as upstream's runtime stage: overlay the tree, then re-assemble the
-# runtime (entry points, resource links) from it.
+# Remove inherited products before copying replacements so old dependency metadata and
+# content-hashed assets cannot survive a lock update.
+RUN rm -rf /opt/hermes/.venv /opt/hermes/node_modules \
+    /opt/hermes/hermes_cli/web_dist /opt/hermes/ui-tui/dist
+COPY --from=railway-python /opt/hermes/.venv /opt/hermes/.venv
+COPY --from=railway-frontend /opt/products/tui /opt/hermes/ui-tui
+COPY --from=railway-frontend /opt/products/web /opt/hermes/hermes_cli/web_dist
+COPY --from=railway-frontend /opt/hermes/node_modules/typescript /opt/hermes/node_modules/typescript
+RUN mkdir -p /opt/hermes/node_modules/.bin \
+    && ln -s ../typescript/bin/tsc /opt/hermes/node_modules/.bin/tsc
+
+# Same source assembly as upstream. Photon keeps its postinstall compatibility patch; npm ci
+# replaces its inherited node_modules with exactly the sidecar lock's production closure.
 COPY --link --chmod=a+rX,go-w . /opt/hermes/
+RUN cd plugins/platforms/photon/sidecar && npm ci --no-audit --fetch-retries=5 \
+    && npm cache clean --force
 RUN /opt/hermes/.venv/bin/python -m docker.build_agent \
     && printf '%s\n' "${HERMES_CUSTOM_REVISION}" > /opt/hermes/.hermes_build_sha
 # Tracked non-executable in git; upstream's runtime stage re-copies it executable the same way.

@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "reviews": [
+    {
+      "package": {
+        "name": "kittentts",
+        "version": "0.8.1",
+        "source": {
+          "url": "https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl"
+        },
+        "wheels": [
+          {
+            "url": "https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl",
+            "hash": "sha256:482a436c4f1f3192153710376e459ff3689517ebcda7c2b051e2fd4187b41851"
+          }
+        ]
+      },
+      "commit": "f0282f0198d497b7256535b755f9f3e339c1baa7",
+      "osv_package": {
+        "ecosystem": "PyPI",
+        "name": "kittentts"
+      },
+      "reviewed_on": "2026-09-29",
+      "provenance": [
+        "https://github.com/KittenML/KittenTTS/releases/tag/0.8.1",
+        "https://github.com/KittenML/KittenTTS/tree/f0282f0198d497b7256535b755f9f3e339c1baa7"
+      ],
+      "reason": "Release asset digest matches the lock and downloaded wheel. Every RECORD entry validates; all five installed Python files byte-match the tag commit. There is no PyPI 0.8.1 distribution. Commit plus all-version package advisory queries supplement this exact-artifact source review."
+    },
+    {
+      "package": {
+        "name": "misaki",
+        "version": "0.9.4",
+        "source": {
+          "git": "https://github.com/NousResearch/misaki.git?rev=f03fd2be7346952a83d3d4845c217fc7667f322d#f03fd2be7346952a83d3d4845c217fc7667f322d"
+        }
+      },
+      "commit": "f03fd2be7346952a83d3d4845c217fc7667f322d",
+      "osv_package": {
+        "ecosystem": "PyPI",
+        "name": "misaki"
+      },
+      "reviewed_on": "2026-09-29",
+      "provenance": [
+        "https://github.com/NousResearch/misaki/tree/f03fd2be7346952a83d3d4845c217fc7667f322d",
+        "https://github.com/hexgrad/misaki/commit/232a5e32b1f0a2396ac56cc0b498f94d6cd9eb18",
+        "https://pypi.org/project/misaki/0.9.4/"
+      ],
+      "reason": "NousResearch is a fork of hexgrad/misaki. Compared against SHA256 3960fa3e6de179a90ee8e628446a4a4f6b8c730b6e3410999cf396189f4d9c40 PyPI source archive: 57 of 58 runtime files identical; en.py adds the upstream BART fallback. Metadata widens Python support and adds pip/torch/transformers. The real delta was reviewed; this is not treated as PyPI-equivalent."
+    },
+    {
+      "package": {
+        "name": "psutil",
+        "version": "8.0.0",
+        "source": {
+          "git": "https://github.com/giampaolo/psutil.git?rev=380bd2b59c67b0e1b04bbf3a90b11744f4f96644#380bd2b59c67b0e1b04bbf3a90b11744f4f96644"
+        }
+      },
+      "commit": "380bd2b59c67b0e1b04bbf3a90b11744f4f96644",
+      "osv_package": {
+        "ecosystem": "PyPI",
+        "name": "psutil"
+      },
+      "reviewed_on": "2026-09-29",
+      "provenance": [
+        "https://github.com/giampaolo/psutil/commit/380bd2b59c67b0e1b04bbf3a90b11744f4f96644",
+        "https://github.com/giampaolo/psutil/compare/7d512c8e4442a896d56505be3e78f1156f443465...380bd2b59c67b0e1b04bbf3a90b11744f4f96644"
+      ],
+      "reason": "Official upstream Android-support commit, not a PyPI 8.0.0 release. GitHub comparison verifies that the CVE-2019-18874 fix is its ancestor (merge base equals fix, behind_by=0). No other published psutil advisories were returned. These findings are accepted only for this exact source and unchanged advisory contents.",
+      "reviewed_unaffected": {
+        "GHSA-qfc5-mcwq-26q8": {
+          "sha256": "09ee4b511849f8f5b9513723da617ee4fb195f2cfb94036d79612aaca6ba5557",
+          "reason": "CVE-2019-18874, fixed by ancestor 7d512c8e4442a896d56505be3e78f1156f443465 (released in 5.6.6)."
+        },
+        "PYSEC-2019-41": {
+          "sha256": "916a0a1ba49cdaafda1aa03202307904730bafa8b82f8e8bfa77dcc7cbc9ee8b",
+          "reason": "Duplicate CVE-2019-18874 record; same verified fix ancestor."
+        }
+      }
+    }
+  ]
+}

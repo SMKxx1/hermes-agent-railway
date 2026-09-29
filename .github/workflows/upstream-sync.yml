@@ -51,9 +51,9 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.SYNC_TOKEN }}
 
-      # The Railway image is a thin layer on nousresearch/hermes-agent, so source and base image
-      # must match: sync to the upstream commit the published :main image was built from, and
-      # pin that image in the same pull request.
+      # Keep inherited toolchain/service layout aligned with the upstream source: merge the
+      # published :main image's commit and pin that image in the same pull request. The Docker
+      # build then applies the fork's reviewed dependency locks and rebuilds its frontends.
       - name: Resolve the upstream image and its source commit
         id: image
         run: |

@@ -1,15 +1,38 @@
 # Railway distribution changes
 
+## Catch-up validation and dependency repairs (2026-09-29)
+
+- Corrected the Docker custom-MCP contract for MCP 2's `MCPServer` API,
+  workspace-owned dependencies, and the CLI's tool-enablement confirmation.
+  Local image builds explicitly select `Dockerfile.railway`.
+- The workflow guard now sweeps sync branches and trusted pull-request activity,
+  runs after upstream sync, and cancels late runs even for already-disabled
+  workflows. It never checks out pull-request code. Disabling remains reactive:
+  GitHub can start a newly registered workflow before the guard cancels it.
+- Retained the strict dependency security gate and carried temporary fixes in
+  the fork's Python and npm locks. The image now rebuilds Python dependencies,
+  dashboard/TUI bundles, and Photon dependencies from those locks, replacing
+  inherited artifacts. The pinned upstream image still supplies its toolchain
+  and service layout.
+- Python auditing covers both application and package-manager locks. The three
+  direct-source dependencies have exact-artifact provenance reviews and ongoing
+  advisory checks; changed sources or unreviewed advisories fail the gate.
+- Desktop development dependencies include Electron 41.10.3 to cover both
+  reported Electron vulnerabilities. Its disabled release workflow accepts the
+  lockfile's updated dependency location. The desktop app is not part of the
+  Railway image.
+
 ## Fork of NousResearch/hermes-agent with weekly upstream sync (2026-09-29)
 
 - This repository is now a GitHub fork of NousResearch/hermes-agent with the
   distribution's history rebuilt on the upstream commit it was cut from, and
   caught up to upstream `536802c`. A weekly workflow opens a pull request with
   new upstream commits; nothing reaches `main` until it is merged by hand.
-- Upstream files are kept unchanged so syncs merge cleanly: the distribution
+- Fork-specific entrypoints reduce merge conflicts: the distribution
   README moved to `.github/README.md`, its workflows are `railway-*.yml`, the
   root `Dockerfile` is upstream's, and `railway.toml` selects
-  `Dockerfile.railway`. Upstream workflows are kept but disabled here.
+  `Dockerfile.railway`. Upstream workflows are kept but disabled here; the
+  dependency repairs above are reviewed temporary deviations.
 - `Dockerfile.railway` layers on the published upstream image built from the
   merged commit (Python 3.14 and the pinned PM toolchain); the sync moves the
   commit and the image digest together. `uv`/`uvx` stay on the agent's `PATH`.

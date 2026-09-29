@@ -30,7 +30,7 @@ def railway_image():
     image = os.environ.get("HERMES_TEST_IMAGE")
     if not image:
         image = "hermes-public-contract:test"
-        docker("build", "--build-arg", "HERMES_CUSTOM_REVISION=contract-test", "-t", image, ".", timeout=1200)
+        docker("build", "-f", "Dockerfile.railway", "--build-arg", "HERMES_CUSTOM_REVISION=contract-test", "-t", image, ".", timeout=1200)
     return image
 
 

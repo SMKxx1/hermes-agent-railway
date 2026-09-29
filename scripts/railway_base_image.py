@@ -1,8 +1,9 @@
 """Railway distribution: resolve and pin the upstream base image for Dockerfile.railway.
 
-The Railway image is a thin layer on ``nousresearch/hermes-agent``. Its source must match the
-upstream commit that image was built from, so the weekly sync merges exactly that commit and pins
-exactly that image. Standard library only: it runs in CI before any environment exists.
+The Railway image inherits the toolchain and service layout from ``nousresearch/hermes-agent``.
+The weekly sync merges the image's source commit and pins its digest together. Dependencies and
+frontend bundles are rebuilt from the fork's locks so security fixes reach the runtime.
+Standard library only: this script runs in CI before any environment exists.
 
     python scripts/railway_base_image.py resolve [--tag main]   # prints JSON {digest, revision}
     python scripts/railway_base_image.py pin DIGEST [--refresh YYYY-MM-DD]
