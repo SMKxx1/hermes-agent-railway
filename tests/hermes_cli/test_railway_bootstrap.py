@@ -165,3 +165,64 @@ def test_multiline_input_rejected_without_exposing_value(installation):
     with pytest.raises(BootstrapError) as failure:
         bootstrap(home, managed, seed, env)
     assert "private-test-value" not in str(failure.value)
+
+
+def test_oidc_bootstrap_needs_no_totp_password_and_pins_owner_policy(installation):
+    home, managed, seed, _env = installation
+    env = {
+        "HERMES_DASHBOARD_OIDC_ISSUER": "https://accounts.google.com",
+        "HERMES_DASHBOARD_OIDC_CLIENT_ID": "test-dashboard-client",
+        "HERMES_DASHBOARD_OIDC_ALLOWED_EMAILS": '["owner@example.test"]',
+        "HERMES_DASHBOARD_OIDC_CLIENT_SECRET": "test-client-secret",
+    }
+    assert bootstrap(home, managed, seed, env)["auth_provider"] == "self-hosted"
+    policy = yaml.safe_load((managed / "config.yaml").read_text())["dashboard"]
+    assert policy["auth_providers"] == ["self-hosted"]
+    assert policy["oauth"]["self_hosted"] == {
+        "allowed_subjects": [], "allowed_emails": ["owner@example.test"],
+    }
+    assert dotenv_values(managed / ".env")["HERMES_DASHBOARD_TOTP_AUTH_PASSWORD"] == ""
+    assert "test-client-secret" not in (home / ".env").read_text()
+
+
+@pytest.mark.parametrize("override", [
+    {"HERMES_DASHBOARD_OIDC_ISSUER": ""},
+    {"HERMES_DASHBOARD_OIDC_CLIENT_ID": ""},
+    {"HERMES_DASHBOARD_OIDC_ALLOWED_SUBJECTS": ""},
+    {"HERMES_DASHBOARD_OIDC_ALLOWED_SUBJECTS": "[]"},
+    {"HERMES_DASHBOARD_OIDC_ALLOWED_SUBJECTS": '"owner"'},
+    {"HERMES_DASHBOARD_OIDC_ALLOWED_SUBJECTS": '["${OWNER}"]'},
+    {"HERMES_DASHBOARD_OIDC_ALLOWED_SUBJECTS": '[" owner "]'},
+    {"HERMES_DASHBOARD_OIDC_ISSUER": "http://idp.example.test"},
+    {"HERMES_DASHBOARD_OIDC_ISSUER": "https://idp.example.test:invalid"},
+    {"HERMES_DASHBOARD_OIDC_ALLOWED_SUBJECTS": '["owner\\u007f"]'},
+    {"HERMES_DASHBOARD_OIDC_SCOPES": "email profile"},
+    {"HERMES_DASHBOARD_OIDC_ALLOWED_EMAILS": '["owner@example.test"]'},
+    {"HERMES_DASHBOARD_OIDC_ISSUER": "https://accounts.google.com",
+     "HERMES_DASHBOARD_OIDC_ALLOWED_EMAILS": '["owner@example.test"]',
+     "HERMES_DASHBOARD_OIDC_SCOPES": "openid"},
+])
+def test_incomplete_or_unsafe_oidc_fails_before_writing_volume(installation, override):
+    home, managed, seed, env = installation
+    env.update({
+        "HERMES_DASHBOARD_OIDC_ISSUER": "https://idp.example.test",
+        "HERMES_DASHBOARD_OIDC_CLIENT_ID": "test-client",
+        "HERMES_DASHBOARD_OIDC_ALLOWED_SUBJECTS": '["owner-subject"]',
+    })
+    env.update(override)
+    with pytest.raises(BootstrapError, match="HERMES_DASHBOARD_OIDC_"):
+        bootstrap(home, managed, seed, env)
+    assert not home.exists()
+    assert not managed.exists()
+
+
+def test_blank_oidc_inputs_keep_totp_default_and_are_managed(installation):
+    home, managed, seed, env = installation
+    env["HERMES_DASHBOARD_OIDC_ISSUER"] = "  "
+    env["HERMES_DASHBOARD_OIDC_CLIENT_ID"] = ""
+    assert bootstrap(home, managed, seed, env)["auth_provider"] == "totp"
+    values = dotenv_values(managed / ".env")
+    assert values["HERMES_DASHBOARD_OIDC_ISSUER"] == ""
+    assert values["HERMES_DASHBOARD_OIDC_CLIENT_ID"] == ""
+    assert values["HERMES_DASHBOARD_OIDC_CLIENT_SECRET"] == ""
+    assert values["HERMES_DASHBOARD_OIDC_ALLOWED_SUBJECTS"] == ""

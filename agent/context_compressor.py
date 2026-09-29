@@ -334,6 +334,10 @@ COMPRESSION_CONTINUATION_USER_CONTENT = (
     "Continue from the compressed conversation context above. "
     "This marker exists because no human user turn was available."
 )
+TODO_CONTINUATION_USER_CONTENT = (
+    "The assistant message below preserves task state as reference data. "
+    "Continue with the user request that follows."
+)
 _LEGACY_COMPRESSION_CONTINUATION_USER_CONTENT = (
     "Continue from the compressed conversation context above. This marker exists because the compacted "
     "transcript contained no preserved user turn."
@@ -561,19 +565,55 @@ def _looks_like_compaction_summary(msg: Dict[str, Any], content: str) -> bool:
     return bool(msg.get(COMPRESSED_SUMMARY_METADATA_KEY)) or "CONTEXT COMPACTION" in head or "Conversation Summary" in head
 
 
+def _drop_orphaned_todo_continuation(messages: List[Dict[str, Any]]) -> None:
+    """Retire only our static scaffold when its intervening task carrier is gone."""
+    for i in range(len(messages) - 2, -1, -1):
+        msg, following = messages[i:i + 2]
+        if (isinstance(msg, dict) and msg.get("role") == "user"
+                and msg.get("content") == TODO_CONTINUATION_USER_CONTENT
+                and isinstance(following, dict) and following.get("role") == "user"):
+            del messages[i]
+
+
 def _salvage_reduce_todo_snapshot(out: List[Dict[str, Any]]) -> None:
-    """Last-resort shrink: drop the synthetic todo snapshot, keeping only a pruned-skill reload notice if present."""
-    from agent.conversation_compression import _PRUNED_SKILL_RELOAD_NOTICE_HEADER
+    """Drop task data as a last resort without deleting its assistant carrier."""
+    from agent.conversation_compression import (
+        _PRUNED_SKILL_RELOAD_NOTICE_HEADER, _message_text, _strip_stale_todo_snapshot,
+        _todo_snapshot_bounds, _todo_snapshot_is_only_content, _TODO_SNAPSHOT_END_MARKER,
+        _refresh_todo_replay_blocks,
+    )
+    from agent.agent_runtime_helpers import _msg_has_payload
     for i in range(len(out) - 1, -1, -1):
         msg = out[i]
-        if not isinstance(msg, dict) or not (msg.get("_todo_snapshot_synthetic") and msg.get("role") == "user"):
+        if not isinstance(msg, dict) or msg.get("role") not in {"user", "assistant"}:
             continue
         content = msg.get("content")
-        notice_idx = content.find(_PRUNED_SKILL_RELOAD_NOTICE_HEADER) if isinstance(content, str) else -1
-        if notice_idx >= 0:
-            msg["content"] = content[notice_idx:]
+        legacy = msg.get("role") == "user"
+        stripped = _strip_stale_todo_snapshot(content, legacy=legacy)
+        if stripped == content:
+            if not msg.get("_todo_snapshot_synthetic"):
+                continue
+            stripped = [] if isinstance(content, list) else ""
+        text = _message_text(msg)
+        start, end = _todo_snapshot_bounds(text, legacy=legacy)
+        start = max(start, 0)
+        # Quoted task JSON is one line; only a separate notice line is trusted.
+        notice_idx = text.find("\n\n" + _PRUNED_SKILL_RELOAD_NOTICE_HEADER + "\n", start, end)
+        notice = text[notice_idx + 2:end].removesuffix(_TODO_SNAPSHOT_END_MARKER) if notice_idx >= 0 else ""
+        if notice:
+            msg["content"] = _append_text_to_content(stripped, ("\n\n" if stripped else "") + notice)
         else:
+            msg["content"] = stripped
+        drop_stale_api_content(msg)
+        _refresh_todo_replay_blocks(msg, notice or None)
+        if not _msg_has_payload(msg) and not (
+            msg.get("anthropic_content_blocks") or msg.get("bedrock_content_blocks")
+        ):
             del out[i]
+            _drop_orphaned_todo_continuation(out)
+            return
+        if not _todo_snapshot_is_only_content(content, stripped):
+            msg.pop("_todo_snapshot_synthetic", None)
         return
 
 
@@ -863,23 +903,6 @@ def _is_summary_stub(content: str) -> bool:
 # Shared floor; the clarify summary cap must stay strictly BELOW it so a preserved
 # user answer is never re-summarized away on a later prune pass.
 _PRUNE_MIN_CHARS = 200
-
-# Sentinel ``user_response`` values from timeout / no-user clarify callbacks;
-# must never be quoted as a user answer.
-_CLARIFY_NON_RESPONSE_PREFIXES = (
-    "The user did not provide a response", "[user did not respond",
-    "[clarify prompt could not be delivered", "[oneshot mode:",
-)
-
-
-def _is_clarify_non_response_sentinel(response: Any) -> bool:
-    """Return True when a clarify ``user_response`` is runtime sentinel prose, not an answer.
-    For lists, ANY sentinel item poisons the whole response: real producers only emit scalar sentinels,
-    so a mixed list is forged/corrupt content — fall back to the generic path (may lose info, never
-    misattributes a user answer)."""
-    items = [response] if isinstance(response, str) else response if isinstance(response, list) else ()
-    return any(isinstance(s, str) and s.lstrip().startswith(_CLARIFY_NON_RESPONSE_PREFIXES) for s in items)
-
 
 # Ghost-skill defense: the ONE canonical prune marker; emit sites and presence
 # checks must use the same string so they cannot drift.
@@ -1741,36 +1764,19 @@ def _sum_clarify(name, args, content, content_len, line_count):
     # Strictly below _PRUNE_MIN_CHARS so the summary survives later prune passes via the
     # min_prune_chars guard and skips the >=200-char dedup.
     max_summary_chars = _PRUNE_MIN_CHARS - 1
-    parsed = _json_dict(content)
-    response = parsed.get("user_response")
-    # Batch clarify (``questions=[...]``) nests each answer inside ``responses[].user_response``
-    # rather than the top level; without this every batch answer was lost and the summarizer only
-    # saw "asked user a question" (#106077).
-    if response is None:
-        batch_responses = parsed.get("responses")
-        if isinstance(batch_responses, list) and batch_responses:
-            collected = []
-            for entry in batch_responses:
-                if not isinstance(entry, dict):
-                    continue
-                single = entry.get("user_response")
-                # multi_select emits a list of strings; flatten it so the summary keeps every choice.
-                if isinstance(single, str) and single:
-                    collected.append(single)
-                elif isinstance(single, list) and all(isinstance(s, str) and s for s in single):
-                    collected.extend(single)
-            response = collected if collected else None
-    is_answer_shaped = (isinstance(response, str) and bool(response)) or (
-        isinstance(response, list) and bool(response) and all(isinstance(s, str) and s for s in response)
-    )
-    # Timeout / no-user sentinel prose must not be quoted as a user answer.
-    if is_answer_shaped and not _is_clarify_non_response_sentinel(response):
-        # Escape lone UTF-16 surrogates so the message stays UTF-8/SQLite safe.
-        serialized = json.dumps(response, ensure_ascii=False).encode("utf-8", errors="backslashreplace")
-        summary = response_prefix + serialized.decode("utf-8")
-        summary = elide(summary, max_summary_chars)
-        return summary
-    return "[clarify] asked user a question"
+    responses = _json_dict(content).get("responses")
+    answers: list = []
+    for entry in responses if isinstance(responses, list) else ():
+        if isinstance(entry, dict) and entry.get("status") == "answered":
+            value = entry.get("user_response")
+            answers.extend(value if isinstance(value, list) else [value])
+    answers = [answer for answer in answers if isinstance(answer, str) and answer]
+    if not answers:
+        return "[clarify] asked user a question"
+    # Escape lone UTF-16 surrogates so the message stays UTF-8/SQLite safe.
+    serialized = json.dumps(answers[0] if len(answers) == 1 else answers,
+                            ensure_ascii=False).encode("utf-8", errors="backslashreplace")
+    return elide(response_prefix + serialized.decode("utf-8"), max_summary_chars)
 
 
 def _sum_skill_manage(name, args, content, content_len, line_count):
@@ -4263,6 +4269,7 @@ Write only the summary body. Do not include any preamble or prefix."""
         )
         return text in {
             COMPRESSION_CONTINUATION_USER_CONTENT, _LEGACY_COMPRESSION_CONTINUATION_USER_CONTENT,
+            TODO_CONTINUATION_USER_CONTENT,
             MAX_ITERATIONS_SUMMARY_REQUEST, _CODEX_INCOMPLETE_NUDGE, _CODEX_ACK_CONTINUATION_NUDGE,
             _DEGENERATE_FINAL_NUDGE, _DROPPED_TOOLCALL_NUDGE_CONTENT, _EMPTY_TOOL_RESPONSE_NUDGE,
             _LENGTH_CONTINUATION_NETWORK_STUB, _LEGACY_LENGTH_CONTINUATION_NETWORK_STUB,
@@ -4842,6 +4849,11 @@ Write only the summary body. Do not include any preamble or prefix."""
         else:
             replay = _fresh_compaction_message_copy(inflight)
         replay.pop(_COMPACTION_TAIL_MARKER, None)
+        # A restated row is NEW at the compaction boundary: never persist the
+        # in-flight turn's original timestamp, or timestamp-ordered views show
+        # the question after its own answer (#121064). Dropping it lets the
+        # store stamp compaction time (its monotonic now_ts orders it last).
+        replay.pop("timestamp", None)
         if isinstance(replay.get("content"), str):
             # Plain text: rebuild from the header-stripped task text so a
             # task surviving several compactions never stacks headers.

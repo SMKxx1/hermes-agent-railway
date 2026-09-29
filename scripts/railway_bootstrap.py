@@ -15,6 +15,7 @@ import secrets
 import sys
 import tempfile
 from typing import Mapping
+from urllib.parse import urlsplit
 
 from dotenv import dotenv_values
 
@@ -43,9 +44,87 @@ MANAGED_KEYS = frozenset({
     "WHATSAPP_HOME_CHANNEL_THREAD_ID", "HERMES_DASHBOARD_TOTP_AUTH_USERNAME",
     "HERMES_DASHBOARD_TOTP_AUTH_PASSWORD",
     "HERMES_DASHBOARD_TOTP_AUTH_PASSWORD_HASH",
+    "HERMES_DASHBOARD_OIDC_ISSUER", "HERMES_DASHBOARD_OIDC_CLIENT_ID",
+    "HERMES_DASHBOARD_OIDC_CLIENT_SECRET", "HERMES_DASHBOARD_OIDC_SCOPES",
+    "HERMES_DASHBOARD_OIDC_ALLOWED_SUBJECTS",
+    "HERMES_DASHBOARD_OIDC_ALLOWED_EMAILS",
 })
 _CREDENTIAL_SUFFIXES = ("_API_KEY", "_TOKEN", "_CLIENT_SECRET")
 _NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_TOTP_CREDENTIALS = (
+    "HERMES_DASHBOARD_TOTP_AUTH_USERNAME", "HERMES_DASHBOARD_TOTP_AUTH_PASSWORD",
+    "HERMES_DASHBOARD_TOTP_AUTH_PASSWORD_HASH",
+)
+_OIDC_SETTINGS = (
+    "HERMES_DASHBOARD_OIDC_ISSUER", "HERMES_DASHBOARD_OIDC_CLIENT_ID",
+    "HERMES_DASHBOARD_OIDC_CLIENT_SECRET", "HERMES_DASHBOARD_OIDC_SCOPES",
+    "HERMES_DASHBOARD_OIDC_ALLOWED_SUBJECTS",
+    "HERMES_DASHBOARD_OIDC_ALLOWED_EMAILS",
+)
+
+
+def _owner_list(environ: Mapping[str, str], key: str) -> list[str]:
+    raw = environ.get(key, "").strip()
+    if not raw:
+        return []
+    try:
+        values = json.loads(raw)
+    except ValueError:
+        raise BootstrapError(f"{key} must be a JSON list of owner identities") from None
+    if (not isinstance(values, list)
+            or any(not isinstance(s, str) or not s.strip() or s != s.strip()
+                   or any(ord(c) < 32 or ord(c) == 127 for c in s) or "${" in s for s in values)):
+        raise BootstrapError(f"{key} must be a JSON list of literal, nonblank identities")
+    return values
+
+
+def _auth_policy(environ: Mapping[str, str]) -> dict:
+    """Validate operator input before writing the volume; OIDC needs an owner policy."""
+    subjects: list[str] = []
+    emails: list[str] = []
+    oidc = any(environ.get(key, "").strip() for key in _OIDC_SETTINGS)
+    if oidc:
+        for key in ("HERMES_DASHBOARD_OIDC_ISSUER", "HERMES_DASHBOARD_OIDC_CLIENT_ID"):
+            if not environ.get(key, "").strip():
+                raise BootstrapError(f"Set {key} for OIDC dashboard authentication")
+        try:
+            issuer = urlsplit(environ["HERMES_DASHBOARD_OIDC_ISSUER"].strip())
+            issuer.port  # Validate numeric range before the provider's first network request.
+        except ValueError:
+            raise BootstrapError("HERMES_DASHBOARD_OIDC_ISSUER must be a valid issuer URL") from None
+        if (not issuer.hostname or issuer.username or issuer.password or issuer.query or issuer.fragment
+                or not (issuer.scheme == "https" or (
+                    issuer.scheme == "http" and issuer.hostname in {"localhost", "127.0.0.1", "::1"}))):
+            raise BootstrapError("HERMES_DASHBOARD_OIDC_ISSUER must be an HTTPS issuer URL (HTTP only on loopback)")
+        subjects = _owner_list(environ, "HERMES_DASHBOARD_OIDC_ALLOWED_SUBJECTS")
+        emails = _owner_list(environ, "HERMES_DASHBOARD_OIDC_ALLOWED_EMAILS")
+        if not subjects and not emails:
+            raise BootstrapError("Set HERMES_DASHBOARD_OIDC_ALLOWED_SUBJECTS or HERMES_DASHBOARD_OIDC_ALLOWED_EMAILS to a nonempty JSON list")
+        if emails and environ["HERMES_DASHBOARD_OIDC_ISSUER"].strip().rstrip("/") != "https://accounts.google.com":
+            raise BootstrapError("HERMES_DASHBOARD_OIDC_ALLOWED_EMAILS requires the Google issuer https://accounts.google.com")
+        if any(email.count("@") != 1 or not all(email.split("@"))
+               or any(c.isspace() for c in email) for email in emails):
+            raise BootstrapError("HERMES_DASHBOARD_OIDC_ALLOWED_EMAILS must contain complete email addresses")
+        scopes = environ.get("HERMES_DASHBOARD_OIDC_SCOPES", "").strip()
+        if scopes and "openid" not in scopes.split():
+            raise BootstrapError("HERMES_DASHBOARD_OIDC_SCOPES must include openid")
+        if emails and scopes and "email" not in scopes.split():
+            raise BootstrapError("HERMES_DASHBOARD_OIDC_SCOPES must include email when allowing Google emails")
+    else:
+        username = environ.get("HERMES_DASHBOARD_TOTP_AUTH_USERNAME", "").strip()
+        password = environ.get("HERMES_DASHBOARD_TOTP_AUTH_PASSWORD", "")
+        password_hash = environ.get("HERMES_DASHBOARD_TOTP_AUTH_PASSWORD_HASH", "")
+        if not username or len(username) > 128:
+            raise BootstrapError("Set HERMES_DASHBOARD_TOTP_AUTH_USERNAME (1–128 characters)")
+        if password_hash:
+            if not password_hash.startswith("scrypt$"):
+                raise BootstrapError("HERMES_DASHBOARD_TOTP_AUTH_PASSWORD_HASH must be a scrypt hash")
+        elif len(password) < 12 or len(password) > 1024:
+            raise BootstrapError("Set HERMES_DASHBOARD_TOTP_AUTH_PASSWORD (12–1024 characters)")
+    return {
+        "auth_providers": ["self-hosted" if oidc else "totp"],
+        "oauth": {"self_hosted": {"allowed_subjects": subjects, "allowed_emails": emails}},
+    }
 
 
 def _safe_path(path: Path) -> None:
@@ -158,16 +237,8 @@ def bootstrap(
     """Seed missing instance files and refresh the ephemeral Railway overlay."""
     if not home.is_absolute() or not managed_dir.is_absolute():
         raise BootstrapError("HERMES_HOME and managed directory must be absolute")
-    username = environ.get("HERMES_DASHBOARD_TOTP_AUTH_USERNAME", "").strip()
-    password = environ.get("HERMES_DASHBOARD_TOTP_AUTH_PASSWORD", "")
-    password_hash = environ.get("HERMES_DASHBOARD_TOTP_AUTH_PASSWORD_HASH", "")
-    if not username or len(username) > 128:
-        raise BootstrapError("Set HERMES_DASHBOARD_TOTP_AUTH_USERNAME (1–128 characters)")
-    if password_hash:
-        if not password_hash.startswith("scrypt$"):
-            raise BootstrapError("HERMES_DASHBOARD_TOTP_AUTH_PASSWORD_HASH must be a scrypt hash")
-    elif len(password) < 12 or len(password) > 1024:
-        raise BootstrapError("Set HERMES_DASHBOARD_TOTP_AUTH_PASSWORD (12–1024 characters)")
+    auth_policy = _auth_policy(environ)
+    auth_provider = auth_policy["auth_providers"][0]
 
     for path in (home, managed_dir):
         _safe_path(path)
@@ -232,27 +303,30 @@ def bootstrap(
         if environ.get(key):
             keys.add(key)
     managed_values = {k: environ.get(k, "") for k in keys}
+    # TOTP is exclusive when registered: blank its credentials even when stale
+    # Railway values remain during an OIDC switch. Keep signing/factor state intact.
+    inactive_keys = _TOTP_CREDENTIALS if auth_provider == "self-hosted" else _OIDC_SETTINGS
+    managed_values.update({key: "" for key in inactive_keys})
     # These are wiring/security invariants, not per-user app preferences.
     managed_values["API_SERVER_HOST"] = "127.0.0.1"
     public_url = environ.get("HERMES_DASHBOARD_PUBLIC_URL", "").strip()
     if not public_url and environ.get("RAILWAY_PUBLIC_DOMAIN"):
         public_url = "https://" + environ["RAILWAY_PUBLIC_DOMAIN"].strip()
     if public_url:
-        from urllib.parse import urlsplit
         parsed = urlsplit(public_url)
         if parsed.scheme not in {"https", "http"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise BootstrapError("HERMES_DASHBOARD_PUBLIC_URL must be an absolute HTTP(S) URL without credentials")
         managed_values["HERMES_DASHBOARD_PUBLIC_URL"] = public_url.rstrip("/")
     _replace(managed_dir / ".env", _dotenv(managed_values), gid=gid)
     _replace(managed_dir / "config.yaml", yaml.safe_dump({
-        "dashboard": {"auth_providers": ["totp"]},
+        "dashboard": auth_policy,
         "platforms": {"api_server": {"extra": {"host": "127.0.0.1"}}},
     }, sort_keys=False), gid=gid)
     # Atomic inventory replacement is owned by the instance user.
     _replace(inventory_path, json.dumps(inventory_keys) + "\n", gid=gid)
     _permissions(inventory_path, 0o600, uid, gid)
     collisions = sorted(k for k in keys if values.get(k))
-    return {"config_seeded": seeded, "managed_keys": len(keys), "overridden_names": collisions}
+    return {"config_seeded": seeded, "managed_keys": len(keys), "overridden_names": collisions, "auth_provider": auth_provider}
 
 
 def main() -> int:
@@ -271,7 +345,8 @@ def main() -> int:
                 raise BootstrapError(f"{primary} must be a non-root numeric ID")
             return int(raw)
         result = bootstrap(args.home, args.managed_dir, Path(__file__).resolve().parents[1] / "deploy/railway/defaults.yaml", dict(os.environ), uid=target_id("HERMES_UID", "PUID", account.pw_uid), gid=target_id("HERMES_GID", "PGID", account.pw_gid))
-        print("[railway] Configuration ready; password + authenticator required.")
+        method = "OIDC owner authentication" if result["auth_provider"] == "self-hosted" else "password + authenticator"
+        print(f"[railway] Configuration ready; {method} required.")
         if result["overridden_names"]:
             print("[railway] Railway owns these settings; stored copies are ignored: " + ", ".join(result["overridden_names"]))
         return 0

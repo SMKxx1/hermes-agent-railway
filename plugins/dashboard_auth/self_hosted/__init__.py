@@ -6,12 +6,17 @@ URL, exchanges the code, and verifies the **ID token** (the access token is opaq
 against the discovered ``jwks_uri`` with ``iss``/``aud`` pinned. Public and confidential
 (``client_secret`` layered on top of PKCE, never replacing it) clients both work. Config:
 ``dashboard.oauth.self_hosted.{issuer,client_id,scopes,client_secret}`` or ``HERMES_DASHBOARD_OIDC_*``.
+Optional ``allowed_subjects`` / ``allowed_emails`` lists restrict dashboard access. Email
+authorization requires Google's issuer and a verified Gmail or Workspace email claim. Omitted policies
+preserve unrestricted issuer membership; explicit empty lists deny everyone.
 """
 
 from __future__ import annotations
 
 import base64
+import json
 import logging
+import os
 import threading
 import time
 import urllib.parse
@@ -19,14 +24,13 @@ from typing import Any, Dict, Optional
 
 import httpx
 
-from hermes_cli.dashboard_auth import LoginStart, ProviderError, Session
+from hermes_cli.dashboard_auth import InvalidCodeError, LoginStart, ProviderError, Session
 from plugins.dashboard_auth._shared import (
     JSON_HEADERS,
     TOKEN_ENDPOINT_TIMEOUT_SEC as _TOKEN_ENDPOINT_TIMEOUT_SEC,
     JwtOAuthProvider,
     SkipRegistration,
     exchange_token,
-    load_config_section,
     parse_json_body,
     pkce_login_start,
     refresh_token_from,
@@ -41,6 +45,7 @@ _TAG = "dashboard-auth-self-hosted"
 
 # ``openid`` is mandatory (no ID token without it); profile/email populate display_name/email.
 _DEFAULT_SCOPES = "openid profile email"
+_GOOGLE_ISSUER = "https://accounts.google.com"
 
 # RS256 is the OIDC default; ES256 is common on modern IDPs (Zitadel, newer Keycloak).
 # HS256 is deliberately excluded: it implies a shared secret we don't hold in the
@@ -73,13 +78,39 @@ def _origin(url: str) -> tuple:
             parts.port or {"https": 443, "http": 80}.get(scheme))
 
 
+def _identity_allowlist(value: Any, *, field: str) -> frozenset[str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or not item.strip() or "${" in item
+        or any(ord(char) < 32 or ord(char) == 127 for char in item)
+        for item in value
+    ):
+        raise ValueError(f"OIDC {field} must be a list of nonempty literal strings")
+    if field == "allowed_subjects":
+        if any(item != item.strip() for item in value):
+            raise ValueError("OIDC allowed_subjects must not contain padded subjects")
+        return frozenset(value)
+    emails = frozenset(item.strip().lower() for item in value)
+    if any(
+        email.count("@") != 1 or not all(email.split("@"))
+        or any(char.isspace() for char in email)
+        for email in emails
+    ):
+        raise ValueError("OIDC allowed_emails must contain complete email addresses")
+    return emails
+
+
 class SelfHostedOIDCProvider(JwtOAuthProvider):
     """Generic self-hosted OpenID Connect provider (authorization-code + PKCE)."""
 
     name = "self-hosted"
     display_name = "Self-Hosted OIDC"
 
-    def __init__(self, *, issuer: str, client_id: str, scopes: str = _DEFAULT_SCOPES, client_secret: str = "") -> None:
+    def __init__(
+        self, *, issuer: str, client_id: str, scopes: str = _DEFAULT_SCOPES, client_secret: str = "",
+        allowed_subjects: list[str] | None = None, allowed_emails: list[str] | None = None,
+    ) -> None:
         if not issuer:
             raise ValueError("issuer is required")
         if not client_id:
@@ -88,6 +119,10 @@ class SelfHostedOIDCProvider(JwtOAuthProvider):
         # *discovered* issuer so a config/IDP slash mismatch is tolerated.
         self._issuer = issuer.rstrip("/")
         _require_https_or_loopback(self._issuer, field="issuer")
+        self._allowed_subjects = _identity_allowlist(allowed_subjects, field="allowed_subjects")
+        self._allowed_emails = _identity_allowlist(allowed_emails, field="allowed_emails")
+        if self._allowed_emails and self._issuer != _GOOGLE_ISSUER:
+            raise ValueError("OIDC allowed_emails requires the https://accounts.google.com issuer; use allowed_subjects for other issuers")
         self._client_id = client_id
         self._scopes = scopes.strip() or _DEFAULT_SCOPES
         # Empty/whitespace secret ⇒ public client, so a provisioned-but-blank secret
@@ -169,7 +204,12 @@ class SelfHostedOIDCProvider(JwtOAuthProvider):
                 "OIDC token response missing id_token — ensure the 'openid' "
                 "scope is configured and the client is allowed to receive an "
                 "ID token."))
-        claims = self._verify_id_token(id_token)
+        try:
+            claims = self._verify_id_token(id_token)
+        except InvalidCodeError as exc:
+            # A revoked identity during refresh must follow the refresh rejection path,
+            # rather than escaping as a callback-only error and producing an HTTP 500.
+            raise bad_request_exc(str(exc)) from exc
         # Prefer a freshly-issued RT, else keep the previous (some IDPs don't rotate).
         return self._session(id_token, refresh_token_from(payload, previous_refresh_token), claims)
 
@@ -249,9 +289,24 @@ class SelfHostedOIDCProvider(JwtOAuthProvider):
 
     def _verify_id_token(self, id_token: str) -> Dict[str, Any]:
         issuer = self._get_discovery()["issuer"]
-        return verify_jwt(
+        claims = verify_jwt(
             id_token, self._get_jwks_client(), algorithms=list(_ALLOWED_ID_TOKEN_ALGS),
             audience=self._client_id, issuer=issuer, label="ID token")
+        if self._allowed_subjects is None and self._allowed_emails is None:
+            return claims
+        if self._allowed_subjects is not None and claims.get("sub") in self._allowed_subjects:
+            return claims
+        email = claims.get("email")
+        hosted_domain = claims.get("hd")
+        if (self._allowed_emails and issuer == _GOOGLE_ISSUER
+                and claims.get("email_verified") is True and isinstance(email, str)
+                and email.strip().lower() in self._allowed_emails
+                # Google may have verified a third-party email years ago without
+                # controlling its present ownership. Only Gmail/Workspace is authoritative.
+                and (email.strip().lower().endswith("@gmail.com")
+                     or isinstance(hosted_domain, str) and bool(hosted_domain.strip()))):
+            return claims
+        raise InvalidCodeError("This account is not permitted to access the dashboard")
 
     _claims_for = _verify_id_token
 
@@ -275,15 +330,52 @@ class SelfHostedOIDCProvider(JwtOAuthProvider):
 # ---- Plugin entry point ----
 
 def _load_config_oauth_section() -> dict:
-    return load_config_section(logger, _TAG, "dashboard", "oauth", "self_hosted")
+    try:
+        from hermes_cli.config import load_config
+
+        section = load_config()
+    except Exception as exc:
+        # Env credentials must not resurrect an unrestricted provider when its policy
+        # cannot be read. register_provider handles this as a failed registration.
+        raise ProviderError("Cannot load OIDC dashboard authorization settings") from exc
+    for key in ("dashboard", "oauth", "self_hosted"):
+        if not isinstance(section, dict):
+            raise ProviderError("OIDC dashboard configuration must be a mapping")
+        section = section.get(key, {})
+    if not isinstance(section, dict):
+        raise ProviderError("OIDC self_hosted configuration must be a mapping")
+    return section
 
 
 def _settings() -> dict:
     """Resolve SelfHostedOIDCProvider kwargs; the skip reason names BOTH configuration surfaces."""
     oidc_cfg = _load_config_oauth_section()
+    from hermes_cli.managed_scope import load_managed_env
+
+    managed_env = load_managed_env()
 
     def setting(env_name: str, cfg_key: str) -> str:
+        # Managed empty values are intentional tombstones, including the secret of
+        # a public client and the credentials of a disabled provider.
+        if env_name in managed_env:
+            return managed_env[env_name].strip()
         return resolve_env_or_cfg(env_name, oidc_cfg.get(cfg_key))
+
+    def policy(env_name: str, cfg_key: str) -> Any:
+        source = managed_env if env_name in managed_env else os.environ
+        if env_name not in source:
+            return oidc_cfg.get(cfg_key)
+        raw = source[env_name].strip()
+        if not raw:
+            return []
+        try:
+            value = json.loads(raw)
+        except ValueError as exc:
+            raise ValueError(f"OIDC {cfg_key} must be a JSON list") from exc
+        # Explicit null is not an escape hatch from administrator policy.
+        if not isinstance(value, list):
+            raise ValueError(f"OIDC {cfg_key} must be a JSON list")
+        return value
 
     issuer = setting("HERMES_DASHBOARD_OIDC_ISSUER", "issuer")
     client_id = setting("HERMES_DASHBOARD_OIDC_CLIENT_ID", "client_id")
@@ -297,6 +389,8 @@ def _settings() -> dict:
             % (bool(issuer), bool(client_id)))
     return {
         "issuer": issuer, "client_id": client_id,
+        "allowed_subjects": policy("HERMES_DASHBOARD_OIDC_ALLOWED_SUBJECTS", "allowed_subjects"),
+        "allowed_emails": policy("HERMES_DASHBOARD_OIDC_ALLOWED_EMAILS", "allowed_emails"),
         "scopes": setting("HERMES_DASHBOARD_OIDC_SCOPES", "scopes") or _DEFAULT_SCOPES,
         # Credential: canonical home is the env var / ~/.hermes/.env. Empty ⇒ public client.
         "client_secret": setting("HERMES_DASHBOARD_OIDC_CLIENT_SECRET", "client_secret")}

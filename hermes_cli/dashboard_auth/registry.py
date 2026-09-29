@@ -102,9 +102,18 @@ def list_session_providers() -> List[DashboardAuthProvider]:
     # non-empty allowlist that names no loaded provider leaves this list empty, which makes a
     # public dashboard fail closed.
     try:
-        from hermes_cli.config import cfg_get, load_config
+        from hermes_cli.config import _expand_env_vars, cfg_get, load_config
+        from hermes_cli.managed_scope import load_managed_config
 
-        raw = cfg_get(load_config(), "dashboard", "auth_providers", default=None)
+        # The general merged-config loader intentionally tolerates broken managed
+        # files. Authorization cannot treat that failure as permission to revive
+        # an older password/OAuth provider. Read the admin policy strictly first.
+        managed_dashboard = load_managed_config(strict=True).get("dashboard", {})
+        if not isinstance(managed_dashboard, dict):
+            return []
+        raw = (_expand_env_vars(managed_dashboard["auth_providers"])
+               if "auth_providers" in managed_dashboard
+               else cfg_get(load_config(), "dashboard", "auth_providers", default=None))
         allowed = {
             str(name).strip() for name in raw
             if isinstance(name, str) and str(name).strip()
