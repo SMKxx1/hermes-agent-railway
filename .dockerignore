@@ -154,6 +154,5 @@ contributors/
 mcp-research-data/
 sqlite_leak_fix.png
 log.txt
-Dockerfile.upstream
 *.bak*
 *.log

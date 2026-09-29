@@ -1,0 +1,6 @@
+# Railway build settings for services deployed from this repository.
+# The root Dockerfile is the unmodified upstream image; Railway deployments
+# use the Railway-specific image instead.
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile.railway"
