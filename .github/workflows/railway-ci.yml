@@ -33,6 +33,13 @@ jobs:
         run: >-
           scripts/run_tests.sh -j 3
           tests/ci/test_railway_workflow_guard.py
+          tests/agent/test_compression_rotation_state.py
+          tests/agent/test_context_compressor_zero_user_provenance.py
+          tests/agent/test_skill_todo_retention_parity.py
+          tests/agent/test_compression_concurrent_fork.py
+          tests/agent/test_salvage_grown_transcript.py
+          tests/agent/test_in_place_compaction.py
+          tests/agent/test_summary_role_template_alternation.py
           tests/scripts/ci/test_audit_python_lock.py
           tests/hermes_cli/test_railway_bootstrap.py
           tests/hermes_cli/test_railway_auth_modes.py

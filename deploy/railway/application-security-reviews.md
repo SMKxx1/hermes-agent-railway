@@ -42,6 +42,16 @@ with bounded cleanup. The HTTP regression first failed on the reviewed base and
 then passed for token-only, signature-only, and combined authentication. An ingress
 still needs its own network-level flood protection.
 
+[GHSA-xq8w-9jvx-gm3v](https://github.com/advisories/GHSA-xq8w-9jvx-gm3v)
+(CVE-2026-10221): preserved task state is quoted assistant data after compression,
+not a new user instruction or text appended to a real user request. The migration
+also handles old persisted snapshots. Repeated refreshes and budget salvage retain
+ordinary message content, tool-call groups, and native provider replay metadata.
+Tests inspect the outgoing message roles and persisted transcript, including both
+in-place compaction and session rotation. This addresses the reported promotion
+of stored task text into user authority; it is not a claim that all model-level
+prompt injection is impossible.
+
 ## Interpretation and future updates
 
 These conclusions apply to the specific reported defects in reviewed repository
