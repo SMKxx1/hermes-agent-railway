@@ -32,6 +32,8 @@ jobs:
       - name: Run public deployment and auth contracts
         run: >-
           scripts/run_tests.sh -j 3
+          tests/ci/test_railway_workflow_guard.py
+          tests/scripts/ci/test_audit_python_lock.py
           tests/hermes_cli/test_railway_bootstrap.py
           tests/hermes_cli/test_railway_execution.py
           tests/hermes_cli/test_mcp_catalog.py

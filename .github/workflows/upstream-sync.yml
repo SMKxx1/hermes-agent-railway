@@ -142,3 +142,12 @@ jobs:
           else
             gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$head" --title "$title" --body "$body"
           fi
+
+  guard:
+    name: Disable workflows discovered by this sync
+    needs: sync
+    if: always()
+    permissions:
+      actions: write
+      contents: read
+    uses: ./.github/workflows/workflow-guard.yml

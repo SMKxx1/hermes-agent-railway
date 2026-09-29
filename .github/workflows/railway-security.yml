@@ -53,6 +53,8 @@ jobs:
       - name: Install audit tools
         run: python -m pip install uv==0.12.1 pip-audit==2.10.1
       - name: Check lock consistency
-        run: uv lock --check
+        run: |
+          uv lock --check
+          uv lock --check --project pm
       - name: Audit locked versions without installing project code
         run: python scripts/ci/audit_python_lock.py

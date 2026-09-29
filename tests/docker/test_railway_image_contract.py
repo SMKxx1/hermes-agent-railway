@@ -210,7 +210,7 @@ def test_agent_can_install_and_run_code_and_custom_mcp(instance):
     name, _ = instance
     docker("exec", "-u", "hermes", "-e", "HOME=/opt/data", name,
            "/opt/hermes/.venv/bin/python", "-c", r'''
-import json, os, subprocess, sys
+import json, os, subprocess, sys, tomllib
 from pathlib import Path
 from tools.approval_context import set_current_session_key, reset_current_session_key
 from tools.code_execution_tool import execute_code
@@ -227,13 +227,18 @@ finally:
 assert result['status'] == 'success', result
 assert result['output'].strip() == '55'
 
-def run(*args):
-    p = subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=40)
+def run(*args, timeout=40, input=''):
+    p = subprocess.run(args, input=input, capture_output=True, text=True, timeout=timeout)
     assert p.returncode == 0, p.stdout + p.stderr
     return p.stdout
 
 run('uv', 'venv', '--python', '/usr/bin/python3.13', '--no-python-downloads', str(workspace / '.venv'))
-assert run(str(workspace / '.venv/bin/python'), '-c', "print('custom-python')").strip() == 'custom-python'
+workspace_python = str(workspace / '.venv/bin/python')
+assert run(workspace_python, '-c', "print('custom-python')").strip() == 'custom-python'
+# Custom projects own their dependencies; do not install into Hermes's managed environment.
+locked = tomllib.loads(Path('/opt/hermes/uv.lock').read_text())
+mcp_version = next(package['version'] for package in locked['package'] if package['name'] == 'mcp')
+run('uv', 'pip', 'install', '--python', workspace_python, 'mcp==' + mcp_version, timeout=90)
 package = workspace / 'node-cli'
 package.mkdir()
 (package / 'package.json').write_text(json.dumps({
@@ -245,12 +250,13 @@ run('npm', 'install', '--global', '--offline', '--no-audit', '--no-fund', '--ign
 assert run('hermes-runtime-contract-cli').strip() == 'custom-node'
 
 server = workspace / 'server.py'
-server.write_text("from mcp.server.fastmcp import FastMCP\nm=FastMCP('custom')\n@m.tool()\ndef hello()->str:\n return 'hello'\nm.run()\n")
+server.write_text("from mcp.server import MCPServer\nm=MCPServer('custom')\n@m.tool()\ndef hello()->str:\n return 'hello'\nm.run()\n")
 output = run(sys.executable, '-m', 'hermes_cli.main', 'mcp', 'add', 'runtime-contract',
-             '--command', sys.executable, '--args', str(server))
+             '--command', workspace_python, '--connect-timeout', '60', '--args', str(server),
+             timeout=90, input='y\n')
 assert 'Saved' in output, output
-assert 'hello' in run(sys.executable, '-m', 'hermes_cli.main', 'mcp', 'test', 'runtime-contract')
-''', timeout=120)
+assert 'hello' in run(sys.executable, '-m', 'hermes_cli.main', 'mcp', 'test', 'runtime-contract', timeout=90)
+''', timeout=240)
 
 
 def test_config_migration_failure_stops_services(railway_image, tmp_path):
