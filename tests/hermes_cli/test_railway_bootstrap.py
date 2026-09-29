@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 from dotenv import dotenv_values
 
 from scripts.railway_bootstrap import BootstrapError, bootstrap

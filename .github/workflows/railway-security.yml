@@ -36,7 +36,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/node-gyp-audit"
           cp nix/node-gyp-11-4-0-package-lock.json "$RUNNER_TEMP/node-gyp-audit/package-lock.json"
-          node -e 'const fs = require("fs"); const lock = JSON.parse(fs.readFileSync("nix/node-gyp-11-4-0-package-lock.json")); fs.writeFileSync(process.env.RUNNER_TEMP + "/node-gyp-audit/package.json", JSON.stringify(lock.packages[""]));'
+          node -e 'const fs = require("fs"); const lock = JSON.parse(fs.readFileSync("nix/node-gyp-11-4-0-package-lock.json")); lock.packages[""].overrides = JSON.parse(fs.readFileSync("nix/node-gyp-11-4-0-overrides.json")); fs.writeFileSync(process.env.RUNNER_TEMP + "/node-gyp-audit/package.json", JSON.stringify(lock.packages[""]));'
           npm audit --prefix "$RUNNER_TEMP/node-gyp-audit" --package-lock-only --audit-level=low
 
   python-audit:
@@ -53,6 +53,8 @@ jobs:
       - name: Install audit tools
         run: python -m pip install uv==0.12.1 pip-audit==2.10.1
       - name: Check lock consistency
-        run: uv lock --check
+        run: |
+          uv lock --check
+          uv lock --check --project pm
       - name: Audit locked versions without installing project code
         run: python scripts/ci/audit_python_lock.py

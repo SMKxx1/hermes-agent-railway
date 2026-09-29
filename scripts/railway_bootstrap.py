@@ -16,8 +16,12 @@ import sys
 import tempfile
 from typing import Mapping
 
-import yaml
 from dotenv import dotenv_values
+
+# Run as a file by the container hook: make the install root importable for the shared,
+# ruamel-backed YAML helpers (upstream no longer ships PyYAML).
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import hermes_yaml as yaml  # noqa: E402
 
 
 class BootstrapError(ValueError):
@@ -92,14 +96,15 @@ def _replace(path: Path, content: str, *, gid: int | None) -> None:
 
 
 def _dotenv(values: Mapping[str, str]) -> str:
-    # python-dotenv accepts single-quoted values and escaped quotes/backslashes.
+    # Double quotes escaping only backslash and double quote: the one quoted form that Hermes'
+    # own .env tokenizer (agent.secret_scope) and python-dotenv both read back identically.
     # Reject multiline values so a credential cannot become another assignment.
     lines = []
     for key, value in sorted(values.items()):
         if not _NAME.fullmatch(key) or any(c in value for c in "\x00\r\n"):
             raise BootstrapError(f"Invalid single-line setting: {key}")
-        escaped = value.replace("\\", "\\\\").replace("'", "\\'")
-        lines.append(f"{key}='{escaped}'")
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'{key}="{escaped}"')
     return "\n".join(lines) + "\n"
 
 

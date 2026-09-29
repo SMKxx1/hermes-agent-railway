@@ -1,6 +1,7 @@
 name: Upstream sync
 
-# Weekly: collects new NousResearch/hermes-agent commits into one pull request.
+# Weekly: collects new NousResearch/hermes-agent commits into one pull request, up to the
+# commit its published :main image was built from (Dockerfile.railway layers on that image).
 # Nothing reaches main until that pull request is merged by hand.
 #
 # Merge sync pull requests with "Create a merge commit". Squash and rebase
@@ -50,43 +51,70 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.SYNC_TOKEN }}
 
+      # Keep inherited toolchain/service layout aligned with the upstream source: merge the
+      # published :main image's commit and pin that image in the same pull request. The Docker
+      # build then applies the fork's reviewed dependency locks and rebuilds its frontends.
+      - name: Resolve the upstream image and its source commit
+        id: image
+        run: |
+          set -euo pipefail
+          resolved=$(python3 scripts/railway_base_image.py resolve --tag main)
+          echo "digest=$(echo "$resolved" | jq -r .digest)" >> "$GITHUB_OUTPUT"
+          echo "revision=$(echo "$resolved" | jq -r .revision)" >> "$GITHUB_OUTPUT"
+          echo "pinned=$(python3 scripts/railway_base_image.py current)" >> "$GITHUB_OUTPUT"
+          echo "$resolved"
+
       - name: Fetch upstream
         run: git fetch --no-tags "https://github.com/$UPSTREAM_REPO.git" "+main:refs/remotes/upstream/main"
 
       - name: Update mirror branch and sync pull request
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+          REVISION: ${{ steps.image.outputs.revision }}
+          PINNED: ${{ steps.image.outputs.pinned }}
         run: |
           set -euo pipefail
-          behind=$(git rev-list --count main..upstream/main)
-          echo "main is $behind commits behind $UPSTREAM_REPO"
-          if [ "$behind" = 0 ]; then
+          if ! git merge-base --is-ancestor "$REVISION" upstream/main; then
+            echo "::error::Image revision $REVISION is not on $UPSTREAM_REPO main"
+            exit 1
+          fi
+          behind=$(git rev-list --count "main..$REVISION")
+          echo "main is $behind commits behind $UPSTREAM_REPO@$REVISION (image $DIGEST, pinned $PINNED)"
+          if [ "$behind" = 0 ] && [ "$DIGEST" = "$PINNED" ]; then
             exit 0
           fi
 
-          git push --force origin "refs/remotes/upstream/main:refs/heads/$MIRROR_BRANCH"
+          git push --force origin "$REVISION:refs/heads/$MIRROR_BRANCH"
 
-          # Author merges as the token owner so the contributor list is unchanged.
+          # Author commits as the token owner so the contributor list is unchanged.
           git config user.name "$(gh api user --jq .login)"
           git config user.email "$(gh api user --jq '"\(.id)+\(.login)@users.noreply.github.com"')"
 
-          upstream_sha=$(git rev-parse --short=10 upstream/main)
+          short=$(git rev-parse --short=10 "$REVISION")
+          refresh=$(date -u +%F)
+          pin_cmd="python3 scripts/railway_base_image.py pin $DIGEST --refresh $refresh"
           title="Sync with $UPSTREAM_REPO ($behind new commits)"
-          compare="https://github.com/$UPSTREAM_REPO/compare/$(git merge-base main upstream/main)...$upstream_sha"
+          compare="https://github.com/$UPSTREAM_REPO/compare/$(git merge-base main "$REVISION")...$short"
+          summary="Brings in $behind new commits from $UPSTREAM_REPO up to \`$short\` ([changes]($compare)), the commit its published \`:main\` image was built from, and pins that image (\`$DIGEST\`) in \`Dockerfile.railway\`."
 
-          if git merge --no-ff --no-edit -m "Merge $UPSTREAM_REPO@$upstream_sha" upstream/main; then
+          merged=true
+          if [ "$behind" != 0 ]; then
+            git merge --no-ff --no-edit -m "Merge $UPSTREAM_REPO@$short" "$REVISION" || merged=false
+          fi
+          if [ "$merged" = true ]; then
+            if [ "$(python3 scripts/railway_base_image.py pin "$DIGEST" --refresh "$refresh")" = changed ]; then
+              git commit -qam "Pin the Railway base image to $UPSTREAM_REPO@$short"
+            fi
             git push --force origin "HEAD:refs/heads/$SYNC_BRANCH"
             head="$SYNC_BRANCH"; stale="$MIRROR_BRANCH"
-            body=$(printf '%s\n' \
-              "Brings in $behind new commits from $UPSTREAM_REPO up to \`$upstream_sha\` ([changes]($compare))." \
-              "" \
+            body=$(printf '%s\n' "$summary" "" \
               "Merges cleanly. Review Railway CI, then merge with **Create a merge commit**.")
           else
             conflicts=$(git diff --name-only --diff-filter=U | sed 's/^/- `/; s/$/`/')
             git merge --abort
             git push origin --delete "$SYNC_BRANCH" 2>/dev/null || true
             head="$MIRROR_BRANCH"; stale="$SYNC_BRANCH"
-            body=$(printf '%s\n' \
-              "Brings in $behind new commits from $UPSTREAM_REPO up to \`$upstream_sha\` ([changes]($compare))." \
-              "" \
+            body=$(printf '%s\n' "$summary" "" \
               "**Conflicts with main in:**" \
               "$conflicts" \
               "" \
@@ -96,7 +124,9 @@ jobs:
               "git fetch origin main $MIRROR_BRANCH" \
               "git switch -c sync/upstream-manual origin/main" \
               "git merge origin/$MIRROR_BRANCH" \
-              "# resolve, run the Railway tests, commit" \
+              "# resolve, then pin the matching base image:" \
+              "$pin_cmd" \
+              "# run the Railway tests, commit" \
               "git push -u origin sync/upstream-manual" \
               '```' \
               "" \
@@ -112,3 +142,12 @@ jobs:
           else
             gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$head" --title "$title" --body "$body"
           fi
+
+  guard:
+    name: Disable workflows discovered by this sync
+    needs: sync
+    if: always()
+    permissions:
+      actions: write
+      contents: read
+    uses: ./.github/workflows/workflow-guard.yml

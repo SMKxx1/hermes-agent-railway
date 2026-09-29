@@ -166,35 +166,31 @@ agent framework and its built-in `delegate_task` capability remain available.
 
 ## MCP servers and custom code
 
-The [bundled catalog](../../optional-mcps/README.md) includes 25 presets for
-development, search, documentation, workspaces, databases, and creative tools.
+The [bundled catalog](../../optional-mcps/README.md) combines the upstream Hermes
+catalog with a few additional presets for files, git, search and web fetching.
 Browse them in the dashboard's **MCP** page or with `hermes mcp catalog`.
 
 Agents can install servers directly through their terminal:
 
 ```bash
-hermes mcp install time --yes
-hermes mcp install github --yes
-hermes mcp add my-server --yes --command python --args /opt/data/workspace/server.py
+hermes mcp install time
+hermes mcp install github
+hermes mcp add my-server --command python --args /opt/data/workspace/server.py
 hermes mcp test my-server
 ```
 
-Supply required API keys in Railway service variables or the catalog form.
-Railway-managed keys must be changed in Railway. For example, GitHub's preset
-uses `MCP_GITHUB_API_KEY`, while Brave Search uses `BRAVE_API_KEY`. Catalog
-credentials are forwarded only to the server that declares them. Non-secret
-settings such as n8n's URL go to the server's `config.yaml` entry:
+Supply required API keys in Railway service variables or the catalog form;
+Railway variables take precedence. For example, GitHub's preset uses
+`MCP_GITHUB_API_KEY`, while Brave Search uses `BRAVE_API_KEY`. Credentials are
+forwarded only to the server that declares them, and `config.yaml` keeps a
+`${NAME}` reference rather than the value.
 
-```bash
-hermes mcp install n8n --yes --env N8N_BASE_URL=https://n8n.example.com
-```
-
-The installer handles non-interactive agent commands without terminal prompts.
-Missing inputs and failed custom-server connections return errors. `--no-probe`
-can save a connection before the service is reachable. OAuth installation saves
-the connection; finish authorization using **Authenticate** in the dashboard's
-MCP page. This uses the public dashboard callback instead of the container's
-localhost. Start a new conversation after setup to load the tools.
+Agent commands have no terminal, so the installer never waits for input: a
+missing required credential fails with an error that names it. OAuth
+installation saves the connection; finish authorization using **Authenticate**
+in the dashboard's MCP page. This uses the public dashboard callback instead of
+the container's localhost. Start a new conversation after setup to load the
+tools.
 
 Custom Python, JavaScript, and shell code runs inside the Railway container as
 the `hermes` user. Put projects and virtual environments in `/opt/data/workspace`
@@ -222,6 +218,12 @@ hermes config set approvals.mode off
 The bootstrap preserves explicit owner choices across subsequent restarts.
 
 ## Build locally
+
+The build pins the upstream image and its source revision together, then rebuilds
+the Python environment, dashboard, TUI, and Photon sidecar from this checkout's
+lockfiles. This allows reviewed dependency security fixes to reach the deployed
+runtime before upstream publishes them. Old dependency trees and compiled assets
+are replaced, so updating a lockfile cannot leave the inherited version in use.
 
 The image records `RAILWAY_GIT_COMMIT_SHA` when Railway supplies it. For a
 local build, the revision argument is optional:

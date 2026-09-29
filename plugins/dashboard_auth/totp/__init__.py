@@ -544,9 +544,24 @@ def _build_provider() -> TotpAuthProvider:
     return provider
 
 
+def _configured() -> bool:
+    """True when any TOTP credential is set; an untouched install stays silent (upstream's
+    dashboard-auth plugins skip at debug level when unconfigured, warn only on bad config)."""
+    section = _config()
+    return any(_resolve(env, section, key, strip=False) for env, key in (
+        ("HERMES_DASHBOARD_TOTP_AUTH_USERNAME", "username"),
+        ("HERMES_DASHBOARD_TOTP_AUTH_PASSWORD", "password"),
+        ("HERMES_DASHBOARD_TOTP_AUTH_PASSWORD_HASH", "password_hash"),
+    ))
+
+
 def register(ctx) -> None:
     global LAST_SKIP_REASON
     LAST_SKIP_REASON = ""
+    if not _configured():
+        LAST_SKIP_REASON = "TOTP dashboard auth is not configured"
+        logger.debug("dashboard-auth-totp: %s", LAST_SKIP_REASON)
+        return
     try:
         provider = _build_provider()
     except Exception as exc:

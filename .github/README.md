@@ -58,7 +58,7 @@ Credentials are runtime variables, never Docker build arguments. Railway variabl
 ## Development and maintenance
 
 ```sh
-docker build -t hermes-agent-railway:local .
+docker build -f Dockerfile.railway -t hermes-agent-railway:local .
 ```
 
 The Docker build starts from the digest-pinned upstream image, applies Debian package updates, installs application dependencies from this repository's reviewed lockfiles, and rebuilds the dashboard and TUI bundles. Dependency changes therefore reach the running image; inconsistent manifests fail the locked install. Backend-only edits reuse the dependency and frontend build caches.

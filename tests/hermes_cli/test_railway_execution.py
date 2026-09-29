@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 from scripts.railway_bootstrap import _seed_execution_defaults
 
@@ -35,7 +35,7 @@ def test_execution_upgrade_preserves_owner_choices_and_comments(tmp_path, mode):
 
 @pytest.mark.parametrize("mode", [None, "manual"])
 def test_gateway_can_execute_custom_code_with_railway_defaults(tmp_path, monkeypatch, mode):
-    from tools.approval import set_current_session_key, reset_current_session_key
+    from tools.approval_context import set_current_session_key, reset_current_session_key
     from tools.code_execution_tool import execute_code
 
     home = tmp_path / "home"
