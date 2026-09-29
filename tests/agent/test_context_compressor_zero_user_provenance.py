@@ -408,8 +408,8 @@ def test_compress_context_todo_snapshot_stays_synthetic_across_two_boundaries(
     assert first_handoff[COMPRESSED_SUMMARY_HAS_USER_TURN_KEY] is False
     assert "First boundary" in first_handoff["content"]
     assert any(
-        message.get("role") == "user"
-        and str(message.get("content") or "").startswith(TODO_INJECTION_HEADER)
+        message.get("role") == "assistant"
+        and TODO_INJECTION_HEADER in str(message.get("content") or "")
         for message in first
     )
     projected = db.get_messages_as_conversation(session_id)

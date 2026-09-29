@@ -1,5 +1,17 @@
 # Railway distribution changes
 
+## Application security regressions (2026-09-29)
+
+- Feishu webhook requests authenticate before consuming the shared delivery
+  quota. Anonymous error tracking is bounded, malformed envelopes fail closed,
+  and URL verification requires a configured verification token.
+- Compression preserves task state as quoted assistant data rather than user
+  instructions. Existing task snapshots migrate without promoting their content,
+  while retained messages and provider replay metadata stay usable.
+- Railway CI retains source regressions for these defects and eight application
+  advisories whose fixes are already present. The editable application version
+  remains unchanged; see [the source review](application-security-reviews.md).
+
 ## Catch-up validation and dependency repairs (2026-09-29)
 
 - Corrected the Docker custom-MCP contract for MCP 2's `MCPServer` API,

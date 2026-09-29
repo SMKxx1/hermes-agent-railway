@@ -308,7 +308,8 @@ class TestInPlaceAntiGrowthGuard:
             assert any("cleared to save context space" in (body or "") for body in tool_bodies)
             # Tool stubbing alone got under budget, so the todo snapshot (the
             # only in-transcript todo re-injection) survives the salvage.
-            assert any(m.get("_todo_snapshot_synthetic") for m in compressed)
+            assert any(m.get("role") == "assistant" and "leftover" in str(m.get("content")) for m in compressed)
+            assert all("leftover" not in str(m.get("content")) for m in compressed if m.get("role") == "user")
 
 
 class TestCompactedTurnsStaySearchable:

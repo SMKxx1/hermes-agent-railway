@@ -186,7 +186,7 @@ class TestSkillGuidanceSurvivesWithTodos:
             + _skill_pruned_marker("hodle-design-system")
         )
         compressed = self._run_compaction(tmp_path, summary)
-        tail_text = str(compressed[-1]["content"])
+        tail_text = next(str(m["content"]) for m in compressed if TODO_INJECTION_HEADER in str(m.get("content")))
         assert TODO_INJECTION_HEADER in tail_text
         assert "Remove the Lightning screen" in tail_text
         # Parity: the same message that preserved the imperative carries the
@@ -235,9 +235,9 @@ class TestSkillGuidanceSurvivesWithTodos:
         assert len(snapshot_rows) == 1
         row = snapshot_rows[0]
         assert _PRUNED_SKILL_RELOAD_NOTICE_HEADER in str(row["content"])
-        assert row.get("_todo_snapshot_synthetic") is True
+        assert row["role"] == "assistant"
         assert not _is_real_user_message(row)
-        assert ContextCompressor._is_synthetic_compression_user_turn(row)
+        assert not ContextCompressor._transcript_has_real_user_turn([row])
 
 
 class TestNoticeStripLifecycle:
@@ -308,11 +308,11 @@ class TestNoticeStripLifecycle:
             original, "sys", approx_tokens=120_000
         )
         db.close()
-        tail_text = str(compressed[-1]["content"])
+        tail_text = next(str(m["content"]) for m in compressed if TODO_INJECTION_HEADER in str(m.get("content")))
         assert tail_text.count(TODO_INJECTION_HEADER) == 1
         assert tail_text.count(_PRUNED_SKILL_RELOAD_NOTICE_HEADER) == 1
         assert "stale task" not in tail_text
         assert "stale-skill" not in tail_text
         assert "fresh task" in tail_text
         assert "skill_view(name='hodle-design-system')" in tail_text
-        assert "keep this human text" in tail_text
+        assert any(m["role"] == "user" and m["content"] == "keep this human text" for m in compressed)
