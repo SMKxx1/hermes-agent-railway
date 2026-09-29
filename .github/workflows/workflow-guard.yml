@@ -47,7 +47,15 @@ jobs:
             [ -n "$id" ] || continue
             case "$keep" in *" $path "*) continue ;; esac
             echo "Disabling $path"
-            gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/$id/disable"
+            if ! gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/$id/disable"; then
+              # Another guard can disable the workflow after our active listing.
+              # A failed read, an active workflow, or an unknown state must still fail.
+              state=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$id" --jq .state)
+              case "$state" in
+                disabled_manually|disabled_inactivity|disabled_fork|deleted) ;;
+                *) exit 1 ;;
+              esac
+            fi
           done <<< "$workflows"
 
           # Disabling does not stop existing runs, including runs that appear
