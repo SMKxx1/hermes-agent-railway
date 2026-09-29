@@ -10,15 +10,19 @@ Covers, by analogy with ``test_nous_provider.py``:
 5. ``refresh_session`` rotation + error mapping, ``revoke_session`` (RFC 7009).
 6. OIDC discovery: endpoint extraction, issuer pinning, https enforcement.
 
-All HTTP is mocked: nothing here talks to a real IDP.
+Provider contracts use mocked HTTP; authorization tests use a local token/JWKS server.
+Nothing here talks to an external IDP.
 """
 
 from __future__ import annotations
 
 import base64
 import json
+import threading
 import time
 import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
@@ -32,6 +36,7 @@ import plugins.dashboard_auth.self_hosted as oidc_plugin
 from hermes_cli.dashboard_auth import (
     InvalidCodeError,
     ProviderError,
+    RefreshExpiredError,
     Session,
     assert_protocol_compliance,
 )
@@ -731,6 +736,8 @@ class TestPluginRegister:
             "HERMES_DASHBOARD_OIDC_CLIENT_ID",
             "HERMES_DASHBOARD_OIDC_SCOPES",
             "HERMES_DASHBOARD_OIDC_CLIENT_SECRET",
+            "HERMES_DASHBOARD_OIDC_ALLOWED_SUBJECTS",
+            "HERMES_DASHBOARD_OIDC_ALLOWED_EMAILS",
         ):
             monkeypatch.delenv(var, raising=False)
 
@@ -791,6 +798,8 @@ class TestPluginRegister:
             raise OSError("unreadable")
 
         monkeypatch.setattr("hermes_cli.config.load_config", _broken)
+        monkeypatch.setenv("HERMES_DASHBOARD_OIDC_ISSUER", _ISSUER)
+        monkeypatch.setenv("HERMES_DASHBOARD_OIDC_CLIENT_ID", _CLIENT_ID)
         ctx = MagicMock()
         oidc_plugin.register(ctx)  # must not raise
         ctx.register_dashboard_auth_provider.assert_not_called()
@@ -842,3 +851,181 @@ class TestPluginRegister:
         registered = ctx.register_dashboard_auth_provider.call_args.args[0]
         assert registered._client_secret == "cfg-secret"
 
+
+# These tests exercise actual config resolution and signed tokens, not a patched
+# verifier. Only discovery is seeded, allowing Google's pinned issuer to use our
+# local token/JWKS HTTP server without making external requests.
+@pytest.fixture
+def oidc_config_home(tmp_path, monkeypatch):
+    from hermes_cli.managed_scope import invalidate_managed_cache
+
+    home = tmp_path / "hermes"
+    home.mkdir()
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed))
+    for key in ("ISSUER", "CLIENT_ID", "SCOPES", "CLIENT_SECRET", "ALLOWED_SUBJECTS", "ALLOWED_EMAILS"):
+        monkeypatch.delenv(f"HERMES_DASHBOARD_OIDC_{key}", raising=False)
+    invalidate_managed_cache()
+    yield home, managed
+    invalidate_managed_cache()
+
+
+@pytest.fixture
+def local_oidc_tokens(rsa_keypair):
+    state = {"id_token": ""}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"keys": [rsa_keypair["jwk"]]}).encode())
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("content-length", "0")))
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"id_token": state["id_token"], "refresh_token": "test-refresh"}).encode())
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+    thread.start()
+    state["url"] = f"http://127.0.0.1:{server.server_address[1]}"
+    yield state
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
+
+
+@pytest.mark.parametrize(
+    "policy,claims,allowed",
+    [
+        ({}, {}, True),
+        ({"allowed_subjects": None, "allowed_emails": None}, {}, True),
+        ({"allowed_subjects": []}, {}, False),
+        ({"allowed_emails": []}, {}, False),
+        ({"allowed_subjects": ["usr_abc"]}, {}, True),
+        ({"allowed_subjects": ["USR_ABC"]}, {}, False),
+        ({"allowed_subjects": ["someone_else"]}, {}, False),
+        ({"allowed_emails": [" Alice@EXAMPLE.COM "]}, {"email_verified": True, "hd": "example.com"}, True),
+        ({"allowed_emails": ["alice@gmail.com"]}, {"email": "Alice@GMAIL.COM", "email_verified": True}, True),
+        ({"allowed_emails": ["alice@example.com"]}, {"email_verified": True}, False),
+        ({"allowed_emails": ["alice@example.com"]}, {"email_verified": True, "hd": ""}, False),
+        ({"allowed_emails": ["alice@example.com"]}, {"email_verified": True, "hd": True}, False),
+        ({"allowed_emails": ["alice@example.com"]}, {}, False),
+        ({"allowed_emails": ["alice@example.com"]}, {"email_verified": False}, False),
+        ({"allowed_emails": ["alice@example.com"]}, {"email_verified": "true"}, False),
+        ({"allowed_emails": ["alice@example.com"]}, {"email_verified": 1}, False),
+        ({"allowed_emails": ["other@example.com"]}, {"email_verified": True}, False),
+        ({"allowed_subjects": ["someone_else"], "allowed_emails": ["alice@example.com"]},
+         {"email_verified": True, "hd": "example.com"}, True),
+        ({"allowed_subjects": ["usr_abc"], "allowed_emails": []}, {}, True),
+    ],
+)
+def test_owner_policy_applies_to_login_verification_and_refresh(
+    oidc_config_home, local_oidc_tokens, rsa_keypair, policy, claims, allowed,
+):
+    home, _managed = oidc_config_home
+    issuer = "https://accounts.google.com"
+    (home / "config.yaml").write_text(json.dumps({"dashboard": {"oauth": {"self_hosted": {
+        "issuer": issuer, "client_id": _CLIENT_ID, **policy,
+    }}}}))
+    providers = []
+    oidc_plugin.register(SimpleNamespace(register_dashboard_auth_provider=providers.append))
+    assert len(providers) == 1, oidc_plugin.LAST_SKIP_REASON
+    provider = providers[0]
+    provider._discovery = {
+        "issuer": issuer, "authorization_endpoint": f"{issuer}/authorize",
+        "token_endpoint": f"{local_oidc_tokens['url']}/token",
+        "jwks_uri": f"{local_oidc_tokens['url']}/jwks",
+    }
+    provider._discovery_fetched_at = time.time()
+    token = local_oidc_tokens["id_token"] = _mint_id_token(rsa_keypair, iss=issuer, extra_claims=claims)
+    start = provider.start_login(redirect_uri="https://dashboard.example/auth/callback")
+    pkce = dict(part.split("=", 1) for part in start.cookie_payload["hermes_session_pkce"].split(";"))
+    login_kwargs = dict(code="test-code", state=pkce["state"], code_verifier=pkce["verifier"],
+                        redirect_uri="https://dashboard.example/auth/callback")
+    if allowed:
+        sessions = [provider.complete_login(**login_kwargs), provider.verify_session(access_token=token),
+                    provider.refresh_session(refresh_token="test-refresh")]
+        assert all(session is not None and session.user_id == "usr_abc" for session in sessions)
+    else:
+        with pytest.raises(InvalidCodeError, match="not permitted"):
+            provider.complete_login(**login_kwargs)
+        assert provider.verify_session(access_token=token) is None
+        with pytest.raises(RefreshExpiredError, match="not permitted"):
+            provider.refresh_session(refresh_token="test-refresh")
+
+
+@pytest.mark.parametrize(
+    "policy,issuer",
+    [
+        ({"allowed_subjects": "usr_abc"}, _ISSUER),
+        ({"allowed_subjects": [""]}, _ISSUER),
+        ({"allowed_subjects": [" usr_abc"]}, _ISSUER),
+        ({"allowed_subjects": [123]}, _ISSUER),
+        ({"allowed_subjects": ["usr\nabc"]}, _ISSUER),
+        ({"allowed_emails": ["alice"]}, "https://accounts.google.com"),
+        ({"allowed_emails": ["alice@@example.com"]}, "https://accounts.google.com"),
+        ({"allowed_emails": ["alice@example.com"]}, _ISSUER),
+    ],
+)
+def test_invalid_owner_policy_never_registers(oidc_config_home, policy, issuer):
+    home, _managed = oidc_config_home
+    (home / "config.yaml").write_text(json.dumps({"dashboard": {"oauth": {"self_hosted": {
+        "issuer": issuer, "client_id": _CLIENT_ID, **policy,
+    }}}}))
+    providers = []
+    oidc_plugin.register(SimpleNamespace(register_dashboard_auth_provider=providers.append))
+    assert providers == []
+    assert "allowed_" in oidc_plugin.LAST_SKIP_REASON
+
+
+@pytest.mark.parametrize("key", ["ISSUER", "CLIENT_ID", "CLIENT_SECRET", "SCOPES", "ALLOWED_SUBJECTS", "ALLOWED_EMAILS"])
+def test_managed_blank_does_not_revive_process_or_profile_config(oidc_config_home, monkeypatch, key):
+    home, managed = oidc_config_home
+    stale = {
+        "issuer": "https://accounts.google.com", "client_id": _CLIENT_ID,
+        "client_secret": "test-stale-secret", "scopes": "openid email stale_scope",
+        "allowed_subjects": ["old_owner"], "allowed_emails": ["old@example.com"],
+    }
+    (home / "config.yaml").write_text(json.dumps({"dashboard": {"oauth": {"self_hosted": stale}}}))
+    env_name = f"HERMES_DASHBOARD_OIDC_{key}"
+    monkeypatch.setenv(env_name, json.dumps(stale[key.lower()]) if key.startswith("ALLOWED_") else stale[key.lower()])
+    (managed / ".env").write_text(f'{env_name}=""\n')
+    providers = []
+    oidc_plugin.register(SimpleNamespace(register_dashboard_auth_provider=providers.append))
+    if key in {"ISSUER", "CLIENT_ID"}:
+        assert providers == []
+    else:
+        assert len(providers) == 1, oidc_plugin.LAST_SKIP_REASON
+        expected = frozenset() if key.startswith("ALLOWED_") else "openid profile email" if key == "SCOPES" else ""
+        assert getattr(providers[0], f"_{key.lower()}") == expected
+
+
+@pytest.mark.parametrize("raw", ['["managed_owner"]', "[]", "null", "{}", '"owner"', "[broken"])
+def test_managed_policy_survives_config_fallback_and_rejects_invalid_json(oidc_config_home, monkeypatch, raw):
+    _home, managed = oidc_config_home
+    # The generic managed loader intentionally ignores malformed YAML; the identity
+    # gate must remain enforced by the bootstrap's separately managed env policy.
+    (managed / "config.yaml").write_text("dashboard: [\n")
+    monkeypatch.setenv("HERMES_DASHBOARD_OIDC_ALLOWED_SUBJECTS", '["stale_owner"]')
+    (managed / ".env").write_text(
+        f"HERMES_DASHBOARD_OIDC_ISSUER={_ISSUER}\n"
+        f"HERMES_DASHBOARD_OIDC_CLIENT_ID={_CLIENT_ID}\n"
+        f"HERMES_DASHBOARD_OIDC_ALLOWED_SUBJECTS='{raw}'\n"
+    )
+    providers = []
+    oidc_plugin.register(SimpleNamespace(register_dashboard_auth_provider=providers.append))
+    if raw in {'["managed_owner"]', "[]"}:
+        assert len(providers) == 1, oidc_plugin.LAST_SKIP_REASON
+        assert providers[0]._allowed_subjects == frozenset(json.loads(raw))
+    else:
+        assert providers == []
+        assert "JSON list" in oidc_plugin.LAST_SKIP_REASON

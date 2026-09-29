@@ -77,7 +77,8 @@ does not verify a Railway project.
 
 ## Variables
 
-Set these before the first boot:
+Set these before the first boot. TOTP is the default; the OIDC configuration
+below replaces its username/password requirements.
 
 | Variable | Required value |
 | --- | --- |
@@ -113,11 +114,60 @@ examples include `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`,
 variables are authoritative: rotating or removing one does not revive a stale
 copy from the volume.
 
-## First login and recovery
+## OIDC login and owner policy
 
-The Railway bootstrap writes `dashboard.auth_providers: [totp]`; this provider
-is exclusive, so OAuth and the legacy single-factor dashboard providers are not
-used by this deployment.
+To use an external identity provider, supply these Railway variables:
+
+| Variable | Value |
+| --- | --- |
+| `HERMES_DASHBOARD_OIDC_ISSUER` | The provider's HTTPS issuer URL; Google uses `https://accounts.google.com`. |
+| `HERMES_DASHBOARD_OIDC_CLIENT_ID` | The OAuth application's client ID. |
+| `HERMES_DASHBOARD_OIDC_CLIENT_SECRET` | The client secret for confidential clients such as Google web applications; omit for a public client. |
+| `HERMES_DASHBOARD_OIDC_ALLOWED_SUBJECTS` | JSON list of permitted immutable OIDC `sub` values, for example `["owner-subject-id"]`. |
+| `HERMES_DASHBOARD_OIDC_ALLOWED_EMAILS` | Google only: JSON list of owner Gmail or Google Workspace addresses, for example `["owner@example.com"]`. The ID token must contain `email_verified: true`, and a Workspace address also requires Google's `hd` claim. |
+| `HERMES_DASHBOARD_OIDC_SCOPES` | Optional space-separated scopes, default `openid profile email`; must include `openid`, and `email` when using the Google email allowlist. |
+
+At least one owner list must be nonempty. A login is authorized when either
+its subject or its verified Google email matches. Email matching ignores case
+but does not collapse dots, aliases, or domains. A configured issuer and client
+ID alone do not grant dashboard access. Use literal identities without surrounding
+spaces in both JSON lists. Partial OIDC settings stop bootstrap
+with an error before it initializes the volume.
+
+Google accounts using a third-party email address without a Workspace `hd`
+claim must use the subject allowlist. Google does not remain authoritative for
+ownership of those external mailboxes; `email_verified` alone is insufficient.
+See [Google's ID-token verification guidance](https://developers.google.com/identity/gsi/web/guides/verify-google-id-token).
+
+Register `https://<dashboard-domain>/auth/callback` as an authorized redirect
+URI in your identity provider's web application. If the dashboard uses a custom
+domain, set `HERMES_DASHBOARD_PUBLIC_URL` to that HTTPS origin and register the
+matching callback. Supply client credentials in Railway; do not commit the
+downloaded OAuth JSON or copy it into the image or persistent volume. Enable
+the identity provider's MFA policy for the owner account.
+
+The bootstrap selects `dashboard.auth_providers: [self-hosted]` and writes the
+owner lists to `dashboard.oauth.self_hosted.allowed_subjects` and
+`allowed_emails` in the managed configuration. Their managed environment
+copies also remain authoritative over stored configuration. Owner authorization
+is checked on login, session verification, bearer authentication, and refresh.
+Removing an owner and redeploying therefore denies that owner's existing
+sessions as well as new logins.
+
+During OIDC mode, managed blank TOTP credentials prevent a stale password from
+activating the exclusive TOTP provider. The signing secret and
+`dashboard-totp-auth.sqlite3` remain on the volume unchanged. To return to TOTP,
+remove or blank **all six** OIDC variables above, restore the TOTP username and
+password (or password hash), and redeploy with the same volume and signing
+secret. The existing authenticator and recovery state remain usable; stale
+OIDC settings from the volume cannot reactivate OIDC. Do not change the signing
+secret as part of a login-mode switch.
+
+## TOTP first login and recovery
+
+With no OIDC settings supplied, the Railway bootstrap writes
+`dashboard.auth_providers: [totp]`. This provider is exclusive, so OAuth and the
+legacy single-factor dashboard providers are not used in TOTP mode.
 
 1. Open the assigned HTTPS dashboard and submit the configured username and password.
 2. On the first successful password check, scan the displayed `otpauth` QR code (or open its authenticator link).

@@ -842,7 +842,7 @@ Like the Nous provider, it auto-loads and only registers itself once it's config
 
 #### Configuration
 
-Configure an **issuer** and a **client_id** (a public PKCE client — no client secret). The plugin fetches the IDP's `authorization_endpoint`, `token_endpoint`, and `jwks_uri` from `{issuer}/.well-known/openid-configuration`, so you never hardcode endpoint URLs.
+Configure an **issuer** and a **client_id**. Public clients use PKCE; confidential clients also supply a client secret. The plugin fetches the IDP's `authorization_endpoint`, `token_endpoint`, and `jwks_uri` from `{issuer}/.well-known/openid-configuration`, so you never hardcode endpoint URLs.
 
 **`config.yaml`** — the canonical surface:
 
@@ -854,17 +854,23 @@ dashboard:
       issuer: https://auth.example.com/application/o/hermes/   # required
       client_id: hermes-dashboard                              # required
       scopes: "openid profile email"                           # optional (this is the default)
+      allowed_subjects: ["your-stable-provider-subject"]         # limit dashboard access
 ```
 
-**Environment variables** — operator overrides (env wins over `config.yaml` when set non-empty; an empty value is treated as unset):
+**Environment variables** — operator overrides. Nonempty credential values override `config.yaml`. Railway-managed empty values explicitly clear older settings. Identity policy variables are JSON lists; an explicit empty value or `[]` denies access through that policy.
 
 | Env var | Overrides | Notes |
 |---------|-----------|-------|
 | `HERMES_DASHBOARD_OIDC_ISSUER` | `dashboard.oauth.self_hosted.issuer` | OIDC issuer URL — required |
-| `HERMES_DASHBOARD_OIDC_CLIENT_ID` | `dashboard.oauth.self_hosted.client_id` | Public client id — required |
+| `HERMES_DASHBOARD_OIDC_CLIENT_ID` | `dashboard.oauth.self_hosted.client_id` | Client id — required |
 | `HERMES_DASHBOARD_OIDC_SCOPES` | `dashboard.oauth.self_hosted.scopes` | Defaults to `openid profile email` |
+| `HERMES_DASHBOARD_OIDC_CLIENT_SECRET` | — | Secret for a confidential client; PKCE remains enabled |
+| `HERMES_DASHBOARD_OIDC_ALLOWED_SUBJECTS` | `dashboard.oauth.self_hosted.allowed_subjects` | JSON list of permitted stable `sub` identities |
+| `HERMES_DASHBOARD_OIDC_ALLOWED_EMAILS` | `dashboard.oauth.self_hosted.allowed_emails` | Google-only JSON list of permitted verified email addresses |
 
-In your IDP, register a **public** application/client with the authorization-code + PKCE (S256) grant and add the dashboard's callback as an allowed redirect URI. The callback is `<dashboard public URL>/auth/callback` (see [Public URL override](#public-url-override) for how the dashboard derives its public URL behind a proxy).
+In your IDP, register an application/client with the authorization-code + PKCE (S256) grant and add the dashboard's callback as an allowed redirect URI. The callback is `<dashboard public URL>/auth/callback` (see [Public URL override](#public-url-override) for how the dashboard derives its public URL behind a proxy).
+
+Set `allowed_subjects` to restrict access to particular accounts. For Google (`https://accounts.google.com`), `allowed_emails` is also supported: the signed token must have `email_verified: true` and either a Gmail address or a Google Workspace `hd` claim. Google does not guarantee current ownership of other third-party email addresses; use the stable subject for those accounts. Either policy may grant access, and both are checked again on ordinary requests and token refresh. When both policies are omitted or `null`, generic OIDC retains issuer-wide access. Explicit empty lists deny everyone. Railway requires a nonempty owner policy before starting.
 
 #### What it verifies
 
@@ -879,7 +885,7 @@ The provider verifies the OpenID Connect **ID token** (RS256/ES256) against the 
 
 The ID token is what establishes identity — the access token is treated as opaque (the OIDC spec does not require it to be a JWT). Endpoint URLs are required to be HTTPS (loopback `http://` is allowed for local-dev IDPs), and the discovery document's advertised `issuer` must match your configured one (a trailing-slash difference is tolerated). Refresh tokens, when the IDP issues them, are used for silent re-auth via the standard `refresh_token` grant; logout calls the IDP's RFC 7009 `revocation_endpoint` when advertised.
 
-> **Confidential clients** (those with a `client_secret`) are not supported yet — configure a public + PKCE client, which is the typical choice for a browser-facing dashboard.
+> **Google web clients:** keep the downloaded client secret in Railway variables or the instance's secret store. The OAuth client identifies your application; it does not restrict which Google accounts may sign in. Configure the owner policy separately.
 
 #### Worked example: Keycloak
 
