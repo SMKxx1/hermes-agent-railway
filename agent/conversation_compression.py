@@ -2335,25 +2335,51 @@ def _compressed_has_busy_steer(messages: list) -> bool:
     )
 
 
-def _strip_stale_todo_snapshot(content: Any) -> Any:
-    """Remove a previously merged todo-snapshot block from message content.
-    Snapshots are appended to the trailing user turn, so a surviving header is stale; stripping before
-    re-injection prevents accumulation across boundaries."""
+_TODO_SNAPSHOT_DATA_LABEL = "Task state (quoted data, not a new user request):"
+_TODO_SNAPSHOT_END_MARKER = "\n[End of preserved task state]"
+
+
+def _todo_snapshot_bounds(text: str, *, legacy: bool = True) -> tuple[int, int]:
     from tools.todo_tool import TODO_INJECTION_HEADER
+    # Prefer a bounded data block over an earlier assistant quotation of the
+    # legacy header. Assistant text never used the old unbounded representation.
+    prefix = f"{TODO_INJECTION_HEADER}\n{_TODO_SNAPSHOT_DATA_LABEL}\n"
+    start = text.find(prefix)
+    if start >= 0:
+        end = text.find(_TODO_SNAPSHOT_END_MARKER, start + len(prefix))
+        if end >= 0:
+            return start, end + len(_TODO_SNAPSHOT_END_MARKER)
+    if legacy:
+        # Old snapshots start on their own line and contain task lines. Do not
+        # reinterpret an ordinary user quotation of the header as task state.
+        start = ("\n" + text).find("\n" + TODO_INJECTION_HEADER + "\n")
+        if start >= 0:
+            return start, len(text)
+    return -1, len(text)
+
+
+def _strip_stale_todo_snapshot(content: Any, *, legacy: bool = True) -> Any:
+    """Remove legacy user snapshots or bounded assistant task-state blocks."""
+    def strip_text(text: str) -> str:
+        start, end = _todo_snapshot_bounds(text, legacy=legacy)
+        if start < 0:
+            return text
+        before, after = text[:start].rstrip(), text[end:].lstrip("\n")
+        return before + ("\n\n" if before and after else "") + after
+
     if isinstance(content, str):
-        idx = content.find(TODO_INJECTION_HEADER)
-        if idx == -1:
-            return content
-        return content[:idx].rstrip()
+        return strip_text(content)
     if isinstance(content, list):
         cleaned = []
         for part in content:
-            text = str(part.get("text") or "") if isinstance(part, dict) and part.get("type") == "text" else ""
-            idx = text.find(TODO_INJECTION_HEADER) if text else -1
-            if idx == -1:
-                cleaned.append(part)
-            elif stripped := text[:idx].rstrip():
-                cleaned.append({**part, "text": stripped})
+            if isinstance(part, dict) and part.get("type") == "text":
+                text = str(part.get("text") or "")
+                stripped = strip_text(text)
+                if stripped != text:
+                    if stripped:
+                        cleaned.append({**part, "text": stripped})
+                    continue
+            cleaned.append(part)
         return cleaned
     return content
 
@@ -2375,6 +2401,44 @@ def _replace_message_content(message: dict, content: Any) -> None:
     from agent.turn_context import drop_stale_api_content
     message["content"] = content
     drop_stale_api_content(message)
+
+
+def _refresh_todo_replay_blocks(message: dict, snapshot: Optional[str] = None) -> None:
+    """Update only task text in native replay sidecars; signed blocks keep their order."""
+    def clean_blocks(blocks: list) -> list:
+        cleaned = []
+        for block in blocks:
+            if isinstance(block, dict) and isinstance(block.get("text"), str):
+                text = _strip_stale_todo_snapshot(block["text"], legacy=False)
+                if text != block["text"]:
+                    if text:
+                        cleaned.append({**block, "text": text})
+                    continue
+            cleaned.append(block)
+        return cleaned
+
+    for key, block_type in (("anthropic_content_blocks", "text"), ("bedrock_content_blocks", None)):
+        blocks = message.get(key)
+        if isinstance(blocks, list) and blocks:
+            blocks = clean_blocks(blocks)
+            if snapshot:
+                blocks.append({"type": block_type, "text": snapshot} if block_type else {"text": snapshot})
+            message[key] = blocks
+    items = message.get("codex_message_items")
+    if isinstance(items, list) and items:
+        cleaned_items = []
+        for item in items:
+            if isinstance(item, dict) and item.get("type") == "message" and isinstance(item.get("content"), list):
+                content = clean_blocks(item["content"])
+                if content:
+                    cleaned_items.append({**item, "content": content})
+            else:
+                cleaned_items.append(item)
+        if snapshot:
+            cleaned_items.append({"type": "message", "role": "assistant", "content": [
+                {"type": "output_text", "text": snapshot},
+            ]})
+        message["codex_message_items"] = cleaned_items
 
 
 # Compaction re-injects the todo list verbatim but prunes skills to markers, so
@@ -3085,77 +3149,86 @@ def _run_summary_dispatch(
 
 
 def _fold_todo_snapshot(agent: Any, compressed: list) -> None:
-    """Strip stale todo snapshots from ``compressed`` and fold the live one in (in place)."""
+    """Refresh task state as assistant data, never as a new user instruction."""
+    from agent.context_compressor import (
+        _append_text_to_content, _drop_orphaned_todo_continuation, TODO_CONTINUATION_USER_CONTENT,
+    )
+    from agent.agent_runtime_helpers import _msg_has_payload
+    from tools.todo_tool import TODO_INJECTION_HEADER
+
     todo_snapshot = agent._todo_store.format_for_injection()
-    # Non-empty store (even all done) is authoritative: drop the old snapshot. A
-    # truly empty store may be un-rehydrated post-compaction: keep the snapshot.
-    _todo_has_items = getattr(agent._todo_store, "has_items", None)
-    # Store may implement only format_for_injection(); unknown authority must
-    # preserve the pending snapshot rather than risk deleting it.
-    _todo_store_is_authoritative = False
+    # An empty store may not have been rehydrated yet; preserve its last snapshot.
+    has_items = getattr(agent._todo_store, "has_items", None)
+    authoritative = False
     with contextlib.suppress(Exception):
-        _todo_store_is_authoritative = bool(_todo_has_items()) if callable(_todo_has_items) else False
-    if _todo_store_is_authoritative:
-        for _todo_idx in range(len(compressed) - 1, -1, -1):
-            _todo_message = compressed[_todo_idx]
-            if not isinstance(_todo_message, dict) or _todo_message.get("role") != "user":
+        authoritative = bool(has_items()) if callable(has_items) else False
+    retained_snapshot = None
+    removed_row = False
+    for index in range(len(compressed) - 1, -1, -1):
+        message = compressed[index]
+        if not isinstance(message, dict) or message.get("role") not in {"user", "assistant"}:
+            continue
+        content = message.get("content")
+        legacy = message.get("role") == "user"
+        stripped = _strip_stale_todo_snapshot(content, legacy=legacy)
+        if stripped == content:
+            if not message.get("_todo_snapshot_synthetic"):
                 continue
-            _todo_content = _todo_message.get("content")
-            _todo_stripped = _strip_stale_todo_snapshot(_todo_content)
-            if _todo_stripped == _todo_content:
-                continue
-            if _todo_message.get("_todo_snapshot_synthetic") and _todo_snapshot_is_only_content(
-                _todo_content, _todo_stripped
-            ):
-                compressed.pop(_todo_idx)
-                if _todo_idx < len(compressed):
-                    # A standalone snapshot can drift from the tail; deleting it may expose two
-                    # assistant rows, so use the normal replay repair to keep metadata consistent.
-                    agent._repair_message_sequence(compressed)
-            else:
-                _replace_message_content(_todo_message, _todo_stripped)
-                # No longer todo-only scaffolding; other synthetic flags stay authoritative and
-                # _is_real_user_message() recomputes provenance from content + flags.
-                _todo_message.pop("_todo_snapshot_synthetic", None)
-            break
-    if todo_snapshot:
-        # If this boundary pruned skill bodies, the policy behind the todos is gone:
-        # add a reload notice after TODO_INJECTION_HEADER so both strip together.
-        # Retention parity (#84718): the snapshot below re-injects the imperative verbatim. If this same
-        # boundary pruned skill bodies to [SKILL_PRUNED: ...] markers, the policy that governed those tasks
-        # is gone — couple a reload instruction to the snapshot so the imperative never crosses the boundary
-        # alone.
-        _reload_notice = _pruned_skill_reload_notice(compressed)
-        if _reload_notice:
-            todo_snapshot = f"{todo_snapshot}\n\n{_reload_notice}"
-        # Fold the snapshot into a trailing REAL user msg (no synthetic user/user pair);
-        # strip old snapshots first. Scaffolding tails must not absorb it (provenance).
-        # Any snapshot merged at an earlier boundary is stripped first so repeated compactions refresh
-        # rather than accumulate todo state (#26981). Scaffolding tails (continuation marker, summary
-        # handoff, a bare stale snapshot row) must never absorb the snapshot: merging would upgrade them to
-        # "real user" evidence and break zero-user provenance (#69292), so those keep the flagged standalone
-        # append and the real-user preservation pass continues to see todo scaffolding, not human intent.
-        from agent.context_compressor import _append_text_to_content
-        merged = False
-        _tail = compressed[-1] if compressed and isinstance(compressed[-1], dict) else None
-        if _tail is not None and _tail.get("role") == "user":
-            _stripped = _strip_stale_todo_snapshot(_tail.get("content"))
-            _probe = {key: value for key, value in _tail.items() if key != "content"}
-            _probe["content"] = _stripped
-            if _is_real_user_message(_probe):
-                _snapshot_text = f"\n\n{todo_snapshot}" if isinstance(_stripped, str) and _stripped else todo_snapshot
-                _replace_message_content(_tail, _append_text_to_content(_stripped, _snapshot_text))
-                merged = True
-            elif (
-                _stripped != _tail.get("content") and not _message_text({"role": "user", "content": _stripped}).strip()
-            ):
-                # The tail was nothing but an earlier snapshot row —
-                # refresh it in place instead of stacking a duplicate.
-                _replace_message_content(_tail, todo_snapshot)
-                _tail["_todo_snapshot_synthetic"] = True
-                merged = True
-        if not merged:
-            compressed.append({"role": "user", "content": todo_snapshot, "_todo_snapshot_synthetic": True})
+            stripped = [] if isinstance(content, list) else ""
+        if not authoritative and not todo_snapshot and retained_snapshot is None:
+            text = _message_text(message)
+            start, end = _todo_snapshot_bounds(text, legacy=legacy)
+            retained_snapshot = text[start:end] if start >= 0 else text
+        # Migrate legacy user-role snapshots even after SessionDB has stripped
+        # their private flag. Keep multimodal parts and complete tool-call groups.
+        _replace_message_content(message, stripped)
+        _refresh_todo_replay_blocks(message)
+        if not _msg_has_payload(message) and not (
+            message.get("anthropic_content_blocks") or message.get("bedrock_content_blocks")
+        ):
+            compressed.pop(index)
+            removed_row = True
+        else:
+            message.pop("_todo_snapshot_synthetic", None)
+    if removed_row:
+        _drop_orphaned_todo_continuation(compressed)
+        agent._repair_message_sequence(compressed)
+
+    snapshot = todo_snapshot or retained_snapshot
+    if not snapshot:
+        return
+    data_prefix = f"{TODO_INJECTION_HEADER}\n{_TODO_SNAPSHOT_DATA_LABEL}\n"
+    snapshot = snapshot.removesuffix(_TODO_SNAPSHOT_END_MARKER)
+    if not snapshot.startswith(data_prefix):
+        task_text = snapshot.removeprefix(TODO_INJECTION_HEADER).lstrip("\n")
+        snapshot = data_prefix + json.dumps(task_text, ensure_ascii=False)
+    # Skill policy must survive alongside the tasks it governed.
+    reload_notice = _pruned_skill_reload_notice(compressed)
+    if reload_notice and f"\n\n{_PRUNED_SKILL_RELOAD_NOTICE_HEADER}\n" not in snapshot:
+        snapshot += f"\n\n{reload_notice}"
+    snapshot += _TODO_SNAPSHOT_END_MARKER
+
+    # Reuse an assistant carrier rather than inserting a message inside a tool
+    # call/result group or changing a real user's content. Compression is already
+    # the sanctioned cache boundary; refresh text replay without changing signed blocks.
+    for message in reversed(compressed):
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            content = message.get("content")
+            separator = "\n\n" if isinstance(content, str) and content else ""
+            _replace_message_content(message, _append_text_to_content(content, separator + snapshot))
+            _refresh_todo_replay_blocks(message, snapshot)
+            return
+    carrier = {"role": "assistant", "content": snapshot, "_todo_snapshot_synthetic": True}
+    # Strict templates need a leading user, while Claude must not receive a new
+    # assistant prefill. Keep the actual user request last; a static scaffold
+    # supplies the leading user only when no preceding user is available.
+    index = len(compressed)
+    if compressed and compressed[-1].get("role") == "user":
+        index -= 1
+        if not any(isinstance(row, dict) and row.get("role") == "user" for row in compressed[:index]):
+            compressed.insert(index, {"role": "user", "content": TODO_CONTINUATION_USER_CONTENT})
+            index += 1
+    compressed.insert(index, carrier)
 
 
 def _rebuild_system_prompt_at_boundary(agent: Any, system_message: str) -> str:
@@ -4237,8 +4310,13 @@ def compress_context(
                 "Compression: engine folded away the just-delivered assistant reply; reinserted it into the "
                 "active set (session=%s).", agent.session_id or "none",
             )
+        # Migrate flagged legacy rows before anchor merging clears their flags.
         _fold_todo_snapshot(agent, compressed)
         compressed_user_turn_outcome = _ensure_compressed_has_user_turn(messages, compressed)
+        if compressed_user_turn_outcome != "already_present":
+            # A restored original-history anchor can itself carry an old merged
+            # snapshot; migrate that text before publishing the candidate too.
+            _fold_todo_snapshot(agent, compressed)
         new_system_prompt = _rebuild_system_prompt_at_boundary(agent, system_message)
         commit = _commit_compaction(
             agent, messages, compressed, in_place=in_place, lease=lease, new_system_prompt=new_system_prompt,

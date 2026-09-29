@@ -334,6 +334,10 @@ COMPRESSION_CONTINUATION_USER_CONTENT = (
     "Continue from the compressed conversation context above. "
     "This marker exists because no human user turn was available."
 )
+TODO_CONTINUATION_USER_CONTENT = (
+    "The assistant message below preserves task state as reference data. "
+    "Continue with the user request that follows."
+)
 _LEGACY_COMPRESSION_CONTINUATION_USER_CONTENT = (
     "Continue from the compressed conversation context above. This marker exists because the compacted "
     "transcript contained no preserved user turn."
@@ -561,19 +565,55 @@ def _looks_like_compaction_summary(msg: Dict[str, Any], content: str) -> bool:
     return bool(msg.get(COMPRESSED_SUMMARY_METADATA_KEY)) or "CONTEXT COMPACTION" in head or "Conversation Summary" in head
 
 
+def _drop_orphaned_todo_continuation(messages: List[Dict[str, Any]]) -> None:
+    """Retire only our static scaffold when its intervening task carrier is gone."""
+    for i in range(len(messages) - 2, -1, -1):
+        msg, following = messages[i:i + 2]
+        if (isinstance(msg, dict) and msg.get("role") == "user"
+                and msg.get("content") == TODO_CONTINUATION_USER_CONTENT
+                and isinstance(following, dict) and following.get("role") == "user"):
+            del messages[i]
+
+
 def _salvage_reduce_todo_snapshot(out: List[Dict[str, Any]]) -> None:
-    """Last-resort shrink: drop the synthetic todo snapshot, keeping only a pruned-skill reload notice if present."""
-    from agent.conversation_compression import _PRUNED_SKILL_RELOAD_NOTICE_HEADER
+    """Drop task data as a last resort without deleting its assistant carrier."""
+    from agent.conversation_compression import (
+        _PRUNED_SKILL_RELOAD_NOTICE_HEADER, _message_text, _strip_stale_todo_snapshot,
+        _todo_snapshot_bounds, _todo_snapshot_is_only_content, _TODO_SNAPSHOT_END_MARKER,
+        _refresh_todo_replay_blocks,
+    )
+    from agent.agent_runtime_helpers import _msg_has_payload
     for i in range(len(out) - 1, -1, -1):
         msg = out[i]
-        if not isinstance(msg, dict) or not (msg.get("_todo_snapshot_synthetic") and msg.get("role") == "user"):
+        if not isinstance(msg, dict) or msg.get("role") not in {"user", "assistant"}:
             continue
         content = msg.get("content")
-        notice_idx = content.find(_PRUNED_SKILL_RELOAD_NOTICE_HEADER) if isinstance(content, str) else -1
-        if notice_idx >= 0:
-            msg["content"] = content[notice_idx:]
+        legacy = msg.get("role") == "user"
+        stripped = _strip_stale_todo_snapshot(content, legacy=legacy)
+        if stripped == content:
+            if not msg.get("_todo_snapshot_synthetic"):
+                continue
+            stripped = [] if isinstance(content, list) else ""
+        text = _message_text(msg)
+        start, end = _todo_snapshot_bounds(text, legacy=legacy)
+        start = max(start, 0)
+        # Quoted task JSON is one line; only a separate notice line is trusted.
+        notice_idx = text.find("\n\n" + _PRUNED_SKILL_RELOAD_NOTICE_HEADER + "\n", start, end)
+        notice = text[notice_idx + 2:end].removesuffix(_TODO_SNAPSHOT_END_MARKER) if notice_idx >= 0 else ""
+        if notice:
+            msg["content"] = _append_text_to_content(stripped, ("\n\n" if stripped else "") + notice)
         else:
+            msg["content"] = stripped
+        drop_stale_api_content(msg)
+        _refresh_todo_replay_blocks(msg, notice or None)
+        if not _msg_has_payload(msg) and not (
+            msg.get("anthropic_content_blocks") or msg.get("bedrock_content_blocks")
+        ):
             del out[i]
+            _drop_orphaned_todo_continuation(out)
+            return
+        if not _todo_snapshot_is_only_content(content, stripped):
+            msg.pop("_todo_snapshot_synthetic", None)
         return
 
 
@@ -4263,6 +4303,7 @@ Write only the summary body. Do not include any preamble or prefix."""
         )
         return text in {
             COMPRESSION_CONTINUATION_USER_CONTENT, _LEGACY_COMPRESSION_CONTINUATION_USER_CONTENT,
+            TODO_CONTINUATION_USER_CONTENT,
             MAX_ITERATIONS_SUMMARY_REQUEST, _CODEX_INCOMPLETE_NUDGE, _CODEX_ACK_CONTINUATION_NUDGE,
             _DEGENERATE_FINAL_NUDGE, _DROPPED_TOOLCALL_NUDGE_CONTENT, _EMPTY_TOOL_RESPONSE_NUDGE,
             _LENGTH_CONTINUATION_NETWORK_STUB, _LEGACY_LENGTH_CONTINUATION_NETWORK_STUB,
