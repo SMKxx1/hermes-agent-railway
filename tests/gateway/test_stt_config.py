@@ -4,10 +4,10 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 from gateway.config import GatewayConfig, Platform, load_gateway_config
-from gateway.platforms.base import MessageEvent, MessageType
+from gateway.platforms.event import MessageEvent, MessageType
 from gateway.session import SessionSource
 
 
@@ -20,7 +20,7 @@ def test_load_gateway_config_bridges_stt_enabled_from_config_yaml(tmp_path, monk
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()
     (hermes_home / "config.yaml").write_text(
-        yaml.dump({"stt": {"enabled": False}}),
+        yaml.safe_dump({"stt": {"enabled": False}}),
         encoding="utf-8",
     )
 
@@ -30,36 +30,6 @@ def test_load_gateway_config_bridges_stt_enabled_from_config_yaml(tmp_path, monk
     config = load_gateway_config()
 
     assert config.stt_enabled is False
-
-
-def test_qwen_openrouter_config_keeps_the_environment_reference():
-    from tools.transcription_tools import _is_qwen_openrouter_config
-
-    config = {
-        "provider": "openai",
-        "openai": {
-            "model": "qwen/qwen3-asr-1.7b",
-            "base_url": "https://openrouter.ai/api/v1",
-            "api_key": "${OPENROUTER_API_KEY}",
-        },
-    }
-
-    assert _is_qwen_openrouter_config(config)
-    assert config["openai"]["api_key"] == "${OPENROUTER_API_KEY}"
-
-
-def test_qwen_openrouter_is_not_a_different_provider():
-    from tools.transcription_tools import _is_qwen_openrouter_config
-
-    assert not _is_qwen_openrouter_config(
-        {
-            "provider": "openai",
-            "openai": {
-                "model": "qwen/qwen3-asr-1.7b",
-                "base_url": "https://api.openai.com/v1",
-            },
-        }
-    )
 
 
 @pytest.mark.asyncio
@@ -125,30 +95,3 @@ async def test_enrich_message_with_transcription_guards_empty_transcript():
     assert transcripts == []
 
 
-@pytest.mark.asyncio
-async def test_qwen_failure_does_not_fall_back_to_local_stt():
-    from gateway.run import GatewayRunner
-
-    runner = GatewayRunner.__new__(GatewayRunner)
-    runner.config = GatewayConfig(stt_enabled=True)
-    runner._has_setup_skill = lambda: False
-
-    with patch(
-        "tools.transcription_tools.transcribe_audio",
-        return_value={
-            "success": False,
-            "transcript": "",
-            "error": "OpenRouter Qwen transcription failed",
-            "no_fallback": True,
-        },
-    ), patch(
-        "tools.transcription_tools.transcribe_audio_local_fallback",
-        side_effect=AssertionError("Qwen STT must not use local fallback"),
-    ):
-        result, transcripts = await runner._enrich_message_with_transcription(
-            "",
-            ["/tmp/voice.ogg"],
-        )
-
-    assert "could not be transcribed" in result
-    assert transcripts == []

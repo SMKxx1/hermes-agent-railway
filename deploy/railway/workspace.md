@@ -20,11 +20,11 @@ Railway container. Resolve the active profile's paths from `$HERMES_HOME`.
 ## Installing MCP servers for the user
 
 1. Inspect the available presets with `hermes mcp catalog`.
-2. Install a preset with `hermes mcp install NAME --yes`. For a custom server,
-   use `hermes mcp add NAME --yes --command COMMAND --args ARGUMENTS`.
+2. Install a preset with `hermes mcp install NAME`. For a custom server,
+   use `hermes mcp add NAME --command COMMAND --args ARGUMENTS`.
    Put all Hermes options before `--args`, which consumes the rest of the command.
-3. For a remote endpoint, use `hermes mcp add NAME --yes --url URL --auth none`,
-   `--auth header`, or `--auth oauth`, as required by that server.
+3. For a remote endpoint, use `hermes mcp add NAME --url URL`, adding
+   `--auth header` or `--auth oauth` when that server requires it.
 4. Run `hermes mcp test NAME` and check its exit status. A saved connection is
    not proof that authentication or a tool call works.
 5. OAuth servers need the owner to click **Authenticate** on the dashboard MCP

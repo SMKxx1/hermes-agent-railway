@@ -1,52 +1,41 @@
 # syntax=docker/dockerfile:1.7
-# Digest-pinned upstream owns OS tooling, s6, and the root bootstrap contract.
-# Application dependencies are rebuilt from this repository's reviewed locks.
-ARG HERMES_BASE=nousresearch/hermes-agent@sha256:1e32ed53357b867e2efdc9570040bd58b574d129bb783aadb513608255b99cb7
-FROM ${HERMES_BASE} AS dependencies
+# Railway distribution image: a thin layer on the upstream image built from the upstream
+# commit this branch last merged (its org.opencontainers.image.revision label). The toolchain,
+# Python environment, s6 supervision and the prebuilt dashboard/TUI come from that image
+# unchanged; this layer adds the distribution's source and Railway defaults. The distribution
+# keeps upstream's dependency locks, so the base image's environment matches this source.
+# upstream-sync.yml moves the digest and the merged upstream commit together.
+ARG HERMES_BASE=nousresearch/hermes-agent@sha256:45666f35ffa4102e1233ad6df41ccb548a0e4425063f89901117e7e84f74e54a
+FROM ${HERMES_BASE}
 USER root
 WORKDIR /opt/hermes
+
 # Refresh security fixes for packages inherited from the pinned Debian base.
 # Bump this date when reviewing a new batch of distro advisories so the layer
 # is invalidated even when the upstream image digest is unchanged.
-ARG DEBIAN_SECURITY_REFRESH=2026-09-23
+ARG DEBIAN_SECURITY_REFRESH=2026-09-29
 RUN test -n "$DEBIAN_SECURITY_REFRESH" && apt-get update \
     && apt-get upgrade -y --no-install-recommends \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
-COPY pyproject.toml uv.lock ./
-# Preserve the upstream production extra set, but replace vulnerable inherited
-# packages. --locked fails if the manifest and lock disagree; no fresh solve.
-# The repository's CLI Python preference must not download an interpreter into
-# /root: supervised services run as hermes and cannot traverse that directory.
-RUN uv sync --locked --python /usr/bin/python3.13 --no-python-downloads --no-install-project --extra all --extra messaging --extra otlp --extra anthropic --extra bedrock --extra azure-identity --extra hindsight --extra matrix
-COPY package.json package-lock.json ./
-COPY web/package.json web/
-COPY ui-tui/package.json ui-tui/
-COPY tests-js/package.json tests-js/
-COPY ui-tui/packages/hermes-ink/ ui-tui/packages/hermes-ink/
-COPY apps/shared/ apps/shared/
-RUN npm ci --no-audit --include-workspace-root --workspace web --workspace ui-tui --workspace @hermes/shared --workspace @hermes/ink
 
-FROM dependencies AS frontend-build
-# Both bundles must be rebuilt so neither embeds the base's old dependencies.
-COPY --link --chmod=a+rX,go-w web/ /opt/hermes/web/
-COPY --link --chmod=a+rX,go-w ui-tui/ /opt/hermes/ui-tui/
-COPY --link --chmod=a+rX,go-w apps/shared/ /opt/hermes/apps/shared/
-RUN npm run build --workspace web && npm run build --workspace ui-tui
-
-FROM dependencies
 ARG RAILWAY_GIT_COMMIT_SHA
 ARG HERMES_CUSTOM_REVISION=${RAILWAY_GIT_COMMIT_SHA:-unversioned-source-build}
 ARG HERMES_SOURCE_URL
+
+# Same source step as upstream's runtime stage: overlay the tree, then re-assemble the
+# runtime (entry points, resource links) from it.
 COPY --link --chmod=a+rX,go-w . /opt/hermes/
+RUN /opt/hermes/.venv/bin/python -m docker.build_agent \
+    && printf '%s\n' "${HERMES_CUSTOM_REVISION}" > /opt/hermes/.hermes_build_sha
+# Tracked non-executable in git; upstream's runtime stage re-copies it executable the same way.
 COPY --link --chmod=0755 docker/entrypoint-dispatch.sh /opt/hermes/docker/entrypoint-dispatch.sh
 COPY --link --chmod=0755 docker/cont-init.d/00-railway-bootstrap /etc/cont-init.d/00-railway-bootstrap
-COPY --from=frontend-build --link /opt/hermes/hermes_cli/web_dist/ /opt/hermes/hermes_cli/web_dist/
-COPY --from=frontend-build --link /opt/hermes/ui-tui/dist/ /opt/hermes/ui-tui/dist/
-# Restore the editable project entry points after the locked dependency sync.
-RUN uv pip install --no-deps -e .
-# Also remove upstream artifacts already present in the inherited filesystem.
-RUN rm -rf /opt/hermes/contributors /opt/hermes/mcp-research-data /opt/hermes/sqlite_leak_fix.png /opt/hermes/log.txt /opt/hermes/scripts/release.py \
-    && printf '%s\n' "${HERMES_CUSTOM_REVISION}" > /opt/hermes/.hermes_build_sha
+# The agent builds its own project environments in /opt/data/workspace. Upstream keeps its
+# pinned uv inside the PM store and resolves MCP ``uv``/``uvx`` commands there; expose those
+# same binaries on PATH, as upstream does for node and npm.
+RUN HERMES_HOME=/tmp/railway-build python3 -c 'from pathlib import Path; from tools.mcp_tool_config import _managed_launcher; [Path("/usr/local/bin", name).symlink_to(_managed_launcher(name)[0]) for name in ("uv", "uvx")]' \
+    && rm -rf /tmp/railway-build && uv --version && uvx --version
+
 ENV HERMES_DASHBOARD=1 \
     HERMES_DASHBOARD_HOST=0.0.0.0 \
     HERMES_DASHBOARD_PORT=9119 \
@@ -62,7 +51,7 @@ ENV npm_config_prefix=/opt/data/.local \
 LABEL org.opencontainers.image.source="${HERMES_SOURCE_URL}" \
       org.opencontainers.image.revision="${HERMES_CUSTOM_REVISION}" \
       org.opencontainers.image.base.name="nousresearch/hermes-agent" \
-      org.opencontainers.image.base.digest="sha256:1e32ed53357b867e2efdc9570040bd58b574d129bb783aadb513608255b99cb7"
+      org.opencontainers.image.base.digest="sha256:45666f35ffa4102e1233ad6df41ccb548a0e4425063f89901117e7e84f74e54a"
 EXPOSE 9119
-# Preserve upstream ENTRYPOINT: s6 is PID 1, gateway and dashboard drop to hermes.
+# Upstream ENTRYPOINT is kept: s6 is PID 1; the gateway and dashboard drop to the hermes user.
 CMD ["gateway", "run"]

@@ -14,26 +14,20 @@ jobs:
   public-deploy-contracts:
     name: Public deployment contracts
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      # Upstream's own setup step: the locked Python 3.14 toolchain from pm/lock.json plus an
+      # isolated test environment (the same one upstream's Tests workflow uses).
+      - name: Set up locked Python and test dependencies
+        uses: ./.github/actions/setup-pm
         with:
-          python-version: '3.13'
-
-      - name: Create test environment
-        run: python -m venv .venv
-
-      - name: Install locked project test dependencies
-        run: >-
-          .venv/bin/python -m pip install --disable-pip-version-check
-          uv==0.12.1 &&
-          .venv/bin/uv sync --locked --extra dev --extra web --extra messaging
+          extras: '["web", "messaging"]'
+          test-environment: 'true'
 
       - name: Run public deployment and auth contracts
         run: >-
@@ -41,21 +35,20 @@ jobs:
           tests/hermes_cli/test_railway_bootstrap.py
           tests/hermes_cli/test_railway_execution.py
           tests/hermes_cli/test_mcp_catalog.py
-          tests/hermes_cli/test_mcp_catalog_api.py
           tests/hermes_cli/test_mcp_config.py
-          tests/hermes_cli/test_mcp_headless.py
           tests/hermes_cli/test_mcp_security.py
           tests/hermes_cli/test_dashboard_auth_middleware.py
           tests/hermes_cli/test_dashboard_auth_cookies.py
+          tests/hermes_cli/test_dashboard_auth_gate.py
+          tests/hermes_cli/test_dashboard_auth_password_login.py
           tests/hermes_cli/test_dashboard_auth_totp_login.py
           tests/hermes_cli/test_web_server_files.py
           tests/test_tui_gateway_attachment_safety.py
           tests/gateway/test_weak_credential_guard.py
+          tests/gateway/test_telegram_audio_vs_voice.py
+          tests/gateway/test_railway_qwen_stt.py
           tests/hermes_cli/test_sessions_export_md_cli.py
           tests/plugins/dashboard_auth/test_totp_provider.py
-
-      - name: Compile Railway auth and bootstrap modules
-        run: .venv/bin/python -m compileall -q scripts/railway_bootstrap.py plugins/dashboard_auth/totp
 
   railway-image-contract:
     name: Railway image contract
@@ -67,20 +60,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.13'
-
-      - name: Create test environment
-        run: python -m venv .venv
-
       # The shared pytest fixtures import Hermes config even for Docker tests.
-      - name: Install locked project test dependencies
-        run: >-
-          .venv/bin/python -m pip install --disable-pip-version-check
-          uv==0.12.1 &&
-          .venv/bin/uv sync --locked --extra dev --extra web --extra messaging
+      - name: Set up locked Python and test dependencies
+        uses: ./.github/actions/setup-pm
+        with:
+          extras: '["web", "messaging"]'
+          test-environment: 'true'
 
       - name: Build local Railway image
         env:

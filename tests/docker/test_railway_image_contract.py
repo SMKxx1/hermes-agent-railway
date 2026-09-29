@@ -87,7 +87,8 @@ def test_image_runtime_and_content_contract(railway_image):
     assert config["Entrypoint"] == ["/opt/hermes/docker/entrypoint-dispatch.sh"]
     assert config["Cmd"] == ["gateway", "run"] and config["User"] == "root"
     assert config["Labels"]["org.opencontainers.image.revision"]
-    assert config["Labels"]["org.opencontainers.image.base.digest"] == "sha256:1e32ed53357b867e2efdc9570040bd58b574d129bb783aadb513608255b99cb7"
+    from scripts.railway_base_image import current as pinned_base_digest
+    assert config["Labels"]["org.opencontainers.image.base.digest"] == pinned_base_digest()
     env = dict(x.split("=", 1) for x in config["Env"])
     assert env["HERMES_DASHBOARD"] == "1" and env["PORT"] == "9119"
     assert env["S6_BEHAVIOUR_IF_STAGE2_FAILS"] == "2"
@@ -108,7 +109,7 @@ for package in importlib.metadata.distributions():
     assert package.version in locked.get(name, set()), (name, package.version)
 assert (root/'hermes_cli/web_dist/index.html').is_file()
 assert (root/'ui-tui/dist/entry.js').is_file()
-for name in ['.git','.env','auth.json','HERMES_RAILWAY_IMPLEMENTATION_PLAN.md','HERMES_RAILWAY_IMPLEMENTATION_HANDOVER.md','contributors','mcp-research-data','scripts/release.py','agent/orchestrator.py','hermes_cli/route_research']:
+for name in ['.git','.env','auth.json','HERMES_RAILWAY_IMPLEMENTATION_PLAN.md','HERMES_RAILWAY_IMPLEMENTATION_HANDOVER.md','agent/orchestrator.py','hermes_cli/route_research']:
     assert not (root/name).exists(), name
 """)
 
@@ -153,7 +154,7 @@ def test_fresh_enrollment_persistence_and_legacy_login_denied(instance):
     assert browser.request("/api/config")[0] == 200
     # A signed browser session must not authorize another origin's form POST.
     request = urllib.request.Request(
-        browser.base + "/api/ops/config-migrate", data=b"",
+        browser.base + "/api/auth/ws-ticket", data=b"",
         headers={"Origin": "https://untrusted.example", "Content-Type": "application/x-www-form-urlencoded"},
     )
     with pytest.raises(urllib.error.HTTPError) as rejected:
@@ -211,7 +212,7 @@ def test_agent_can_install_and_run_code_and_custom_mcp(instance):
            "/opt/hermes/.venv/bin/python", "-c", r'''
 import json, os, subprocess, sys
 from pathlib import Path
-from tools.approval import set_current_session_key, reset_current_session_key
+from tools.approval_context import set_current_session_key, reset_current_session_key
 from tools.code_execution_tool import execute_code
 
 workspace = Path('/opt/data/workspace/runtime-contract')
@@ -246,7 +247,7 @@ assert run('hermes-runtime-contract-cli').strip() == 'custom-node'
 server = workspace / 'server.py'
 server.write_text("from mcp.server.fastmcp import FastMCP\nm=FastMCP('custom')\n@m.tool()\ndef hello()->str:\n return 'hello'\nm.run()\n")
 output = run(sys.executable, '-m', 'hermes_cli.main', 'mcp', 'add', 'runtime-contract',
-             '--yes', '--command', sys.executable, '--args', str(server))
+             '--command', sys.executable, '--args', str(server))
 assert 'Saved' in output, output
 assert 'hello' in run(sys.executable, '-m', 'hermes_cli.main', 'mcp', 'test', 'runtime-contract')
 ''', timeout=120)

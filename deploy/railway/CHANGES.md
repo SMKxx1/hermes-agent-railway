@@ -1,5 +1,28 @@
 # Railway distribution changes
 
+## Fork of NousResearch/hermes-agent with weekly upstream sync (2026-09-29)
+
+- This repository is now a GitHub fork of NousResearch/hermes-agent with the
+  distribution's history rebuilt on the upstream commit it was cut from, and
+  caught up to upstream `536802c`. A weekly workflow opens a pull request with
+  new upstream commits; nothing reaches `main` until it is merged by hand.
+- Upstream files are kept unchanged so syncs merge cleanly: the distribution
+  README moved to `.github/README.md`, its workflows are `railway-*.yml`, the
+  root `Dockerfile` is upstream's, and `railway.toml` selects
+  `Dockerfile.railway`. Upstream workflows are kept but disabled here.
+- `Dockerfile.railway` layers on the published upstream image built from the
+  merged commit (Python 3.14 and the pinned PM toolchain); the sync moves the
+  commit and the image digest together. `uv`/`uvx` stay on the agent's `PATH`.
+- Upstream now provides the MCP catalog (67 entries), non-interactive installs,
+  and an OpenAI-compatible STT path. The distribution's own MCP installer and
+  Qwen transcription code were dropped in favour of upstream's; Qwen ASR on
+  OpenRouter is plain configuration (`stt.openai.base_url`/`api_key`), and the
+  additional stdio presets now forward only their declared credentials.
+- Re-applied on top of upstream: TOTP login, the provider allowlist, same-origin
+  checks, the account-wide login rate limit, cross-process config locking,
+  literal managed credentials, symlink-safe uploads and file writes, and
+  Telegram/WhatsApp audio transcription.
+
 ## MCP catalog and agent execution
 
 - Expanded the catalog from 5 to 25 presets with documented provider endpoints

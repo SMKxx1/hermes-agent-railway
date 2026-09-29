@@ -7,6 +7,8 @@ transport:
   command: npx
   args: ["-y", "firecrawl-mcp@3.24.0"]
   connect_timeout: 120
+  env:
+    FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY}
 auth:
   type: api_key
   env:

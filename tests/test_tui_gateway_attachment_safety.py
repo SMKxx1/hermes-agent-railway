@@ -20,7 +20,8 @@ def _stage(session, payload):
 
 def test_file_attachment_skips_dangling_symlink(tmp_path):
     session = {"cwd": str(tmp_path), "profile_home": str(tmp_path / "home")}
-    root = server._desktop_attachment_dir(session)
+    root = server._session_home_dir(session, "attachments")
+    root.mkdir(parents=True, exist_ok=True)
     outside = tmp_path / "outside.txt"
     link = root / "report.txt"
     link.symlink_to(outside)
@@ -35,28 +36,21 @@ def test_file_attachment_skips_dangling_symlink(tmp_path):
     assert not outside.exists()
 
 
-def test_concurrent_file_attachments_do_not_overwrite(tmp_path, monkeypatch):
+def test_concurrent_file_attachments_do_not_overwrite(tmp_path):
+    """Same-name uploads racing each other must each claim a distinct file: the write itself
+    claims the name exclusively instead of trusting an earlier availability check."""
     session = {"cwd": str(tmp_path), "profile_home": str(tmp_path / "home")}
-    server._desktop_attachment_dir(session)
-    original = server._unique_attachment_path
-    barrier = threading.Barrier(2)
-    selected = threading.local()
+    payloads = [f"upload {i}".encode() for i in range(8)]
+    barrier = threading.Barrier(len(payloads))
 
-    def select_together(root, filename):
-        target = original(root, filename)
-        if not getattr(selected, "once", False):
-            selected.once = True
-            # Both uploads have selected the same unused filename. The write
-            # itself must claim it exclusively, rather than trusting this check.
-            barrier.wait(timeout=5)
-        return target
+    def stage_together(payload):
+        barrier.wait(timeout=5)
+        return _stage(session, payload)
 
-    monkeypatch.setattr(server, "_unique_attachment_path", select_together)
-    payloads = (b"first upload", b"second upload")
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(lambda payload: _stage(session, payload), payloads))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(payloads)) as pool:
+        results = list(pool.map(stage_together, payloads))
 
-    assert results[0][0] != results[1][0]
+    assert len({stored for stored, _uploaded in results}) == len(payloads)
     for (stored, uploaded), payload in zip(results, payloads):
         assert uploaded
         assert stored.read_bytes() == payload
