@@ -4,7 +4,7 @@
 # supervision, but rebuild dependencies and frontends from this checkout's locks so temporary
 # security fixes also reach the installed runtime, not only the copied manifests.
 # upstream-sync.yml moves the digest and the merged upstream commit together.
-ARG HERMES_BASE=nousresearch/hermes-agent@sha256:45666f35ffa4102e1233ad6df41ccb548a0e4425063f89901117e7e84f74e54a
+ARG HERMES_BASE=nousresearch/hermes-agent@sha256:bfa89773d1e63c0de0cfef8c7308e28853f8dd2920b228c893211af2e0f6bb45
 FROM ${HERMES_BASE} AS railway-base
 USER root
 WORKDIR /opt/hermes
@@ -84,7 +84,7 @@ ENV npm_config_prefix=/opt/data/.local \
 LABEL org.opencontainers.image.source="${HERMES_SOURCE_URL}" \
       org.opencontainers.image.revision="${HERMES_CUSTOM_REVISION}" \
       org.opencontainers.image.base.name="nousresearch/hermes-agent" \
-      org.opencontainers.image.base.digest="sha256:45666f35ffa4102e1233ad6df41ccb548a0e4425063f89901117e7e84f74e54a"
+      org.opencontainers.image.base.digest="sha256:bfa89773d1e63c0de0cfef8c7308e28853f8dd2920b228c893211af2e0f6bb45"
 EXPOSE 9119
 # Upstream ENTRYPOINT is kept: s6 is PID 1; the gateway and dashboard drop to the hermes user.
 CMD ["gateway", "run"]
