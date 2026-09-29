@@ -1,0 +1,114 @@
+name: Upstream sync
+
+# Weekly: collects new NousResearch/hermes-agent commits into one pull request.
+# Nothing reaches main until that pull request is merged by hand.
+#
+# Merge sync pull requests with "Create a merge commit". Squash and rebase
+# merges are disabled in the repository settings because they would cut the
+# link to upstream history and make every later sync conflict.
+#
+# Requires a SYNC_TOKEN secret: a fine-grained personal access token for this
+# repository only, with Contents, Pull requests and Workflows set to
+# read/write. The default GITHUB_TOKEN cannot push upstream commits that change
+# workflow files, and pull requests it opens do not trigger Railway CI.
+
+on:
+  schedule:
+    - cron: '0 1 * * 1' # Mondays 01:00 UTC (09:00 Singapore)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-sync
+
+env:
+  UPSTREAM_REPO: NousResearch/hermes-agent
+  MIRROR_BRANCH: upstream-main # exact copy of upstream main
+  SYNC_BRANCH: sync/upstream-auto # main + upstream, when they merge cleanly
+
+jobs:
+  sync:
+    name: Queue upstream changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+    steps:
+      - name: Require the sync token
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::Add a SYNC_TOKEN repository secret (see the comment at the top of upstream-sync.yml)."
+            exit 1
+          fi
+
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN }}
+
+      - name: Fetch upstream
+        run: git fetch --no-tags "https://github.com/$UPSTREAM_REPO.git" "+main:refs/remotes/upstream/main"
+
+      - name: Update mirror branch and sync pull request
+        run: |
+          set -euo pipefail
+          behind=$(git rev-list --count main..upstream/main)
+          echo "main is $behind commits behind $UPSTREAM_REPO"
+          if [ "$behind" = 0 ]; then
+            exit 0
+          fi
+
+          git push --force origin "refs/remotes/upstream/main:refs/heads/$MIRROR_BRANCH"
+
+          # Author merges as the token owner so the contributor list is unchanged.
+          git config user.name "$(gh api user --jq .login)"
+          git config user.email "$(gh api user --jq '"\(.id)+\(.login)@users.noreply.github.com"')"
+
+          upstream_sha=$(git rev-parse --short=10 upstream/main)
+          title="Sync with $UPSTREAM_REPO ($behind new commits)"
+          compare="https://github.com/$UPSTREAM_REPO/compare/$(git merge-base main upstream/main)...$upstream_sha"
+
+          if git merge --no-ff --no-edit -m "Merge $UPSTREAM_REPO@$upstream_sha" upstream/main; then
+            git push --force origin "HEAD:refs/heads/$SYNC_BRANCH"
+            head="$SYNC_BRANCH"; stale="$MIRROR_BRANCH"
+            body=$(printf '%s\n' \
+              "Brings in $behind new commits from $UPSTREAM_REPO up to \`$upstream_sha\` ([changes]($compare))." \
+              "" \
+              "Merges cleanly. Review Railway CI, then merge with **Create a merge commit**.")
+          else
+            conflicts=$(git diff --name-only --diff-filter=U | sed 's/^/- `/; s/$/`/')
+            git merge --abort
+            git push origin --delete "$SYNC_BRANCH" 2>/dev/null || true
+            head="$MIRROR_BRANCH"; stale="$SYNC_BRANCH"
+            body=$(printf '%s\n' \
+              "Brings in $behind new commits from $UPSTREAM_REPO up to \`$upstream_sha\` ([changes]($compare))." \
+              "" \
+              "**Conflicts with main in:**" \
+              "$conflicts" \
+              "" \
+              "Resolve on a separate branch (this job only rewrites \`$MIRROR_BRANCH\` and \`$SYNC_BRANCH\`):" \
+              "" \
+              '```bash' \
+              "git fetch origin main $MIRROR_BRANCH" \
+              "git switch -c sync/upstream-manual origin/main" \
+              "git merge origin/$MIRROR_BRANCH" \
+              "# resolve, run the Railway tests, commit" \
+              "git push -u origin sync/upstream-manual" \
+              '```' \
+              "" \
+              "Open a pull request from that branch, merge it with **Create a merge commit**, and close this one.")
+          fi
+
+          for number in $(gh pr list --repo "$GITHUB_REPOSITORY" --base main --head "$stale" --state open --json number --jq '.[].number'); do
+            gh pr close "$number" --repo "$GITHUB_REPOSITORY" --comment "Superseded by the latest upstream sync."
+          done
+          existing=$(gh pr list --repo "$GITHUB_REPOSITORY" --base main --head "$head" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          else
+            gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$head" --title "$title" --body "$body"
+          fi

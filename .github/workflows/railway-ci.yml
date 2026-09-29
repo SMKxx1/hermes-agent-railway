@@ -4,13 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-  # Called by upstream-sync.yml to test a sync merge before its PR is opened.
-  workflow_call:
-    inputs:
-      ref:
-        description: Commit to test
-        required: true
-        type: string
+  workflow_dispatch:
 
 # This workflow only reads the checkout and reports checks.
 permissions:
@@ -25,7 +19,6 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.ref }}
           persist-credentials: false
 
       - name: Set up Python
@@ -72,7 +65,6 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.ref }}
           persist-credentials: false
 
       - name: Set up Python

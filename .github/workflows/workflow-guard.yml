@@ -1,0 +1,47 @@
+name: Workflow guard
+
+# Upstream workflow files are kept unchanged so syncs merge cleanly, but they
+# are built for NousResearch/hermes-agent (its secrets, runners and release
+# process). This disables every workflow except this repository's own, and
+# cancels any run an upstream workflow started before it was disabled.
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/**']
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  guard:
+    name: Keep upstream workflows disabled
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      KEEP: >-
+        .github/workflows/railway-ci.yml
+        .github/workflows/railway-security.yml
+        .github/workflows/upstream-sync.yml
+        .github/workflows/workflow-guard.yml
+    steps:
+      - name: Disable upstream workflows
+        run: |
+          set -euo pipefail
+          keep=" $(echo $KEEP) "
+          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/workflows" \
+            --jq '.workflows[] | select(.state == "active") | select(.path | startswith(".github/workflows/")) | "\(.id) \(.path)"' |
+          while read -r id path; do
+            case "$keep" in *" $path "*) continue ;; esac
+            echo "Disabling $path"
+            gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/$id/disable"
+            for status in queued in_progress waiting pending requested; do
+              gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$id/runs?status=$status" --jq '.workflow_runs[].id' |
+              while read -r run; do
+                gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$run/cancel" >/dev/null || true
+              done
+            done
+          done
