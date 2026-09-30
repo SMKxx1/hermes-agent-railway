@@ -23,7 +23,7 @@ let
       ${nodejs}/bin/node -e 'const fs = require("fs"); const manifest = JSON.parse(fs.readFileSync("package.json")); manifest.overrides = JSON.parse(fs.readFileSync("${./node-gyp-11-4-0-overrides.json}")); fs.writeFileSync("package.json", JSON.stringify(manifest));'
     '';
 
-    npmDepsHash = "sha256-EdDcUgS/ItLDNC51LJ90v0PGiydD+otXTn9d2UQmtqw=";
+    npmDepsHash = "sha256-xsnYz08machiNQ7U37hK5T6G3BSjRCBmxjNA9vGCSnI=";
 
     npmDepsFetcherVersion = 2;
 

@@ -14,6 +14,13 @@
 - Railway CI includes dashboard regressions, type checks, a production web build,
   and image contracts for diagnostic commands and version identity. The deployment
   guide explains that a GitHub connection alone does not enable automatic deploys.
+- The security follow-up updates PyJWT to 2.14.0 and OAuthlib to 4.0.0. OAuthlib's
+  exact security pin has a quarantine exception that can be removed after
+  2026-10-12; the remaining quarantine and full advisory checks stay enabled.
+- npm security fixes update `brace-expansion` to 5.0.12 in the root and website
+  locks, `ip-address` to 10.7.1, and desktop Electron to 41.10.7. The vendored
+  Nix node-gyp lock uses fixed `brace-expansion` 1.1.21, 2.1.7, and 5.0.12,
+  with its dependency hash refreshed and the derivation rebuilt successfully.
 
 ## Application security regressions (2026-09-29)
 

@@ -92,7 +92,7 @@ dependencies = [
   # it out of the lazy-install path that exists only for the heavy matrix deps.
   "Markdown==3.10.2; python_version >= '3.14'",
   # Skills Hub (GitHub App JWT auth — optional, only needed for bot identity)
-  "PyJWT[crypto]==2.13.0; python_version >= '3.14'",  # PYSEC-2026-175/177/178/179
+  "PyJWT[crypto]==2.14.0; python_version >= '3.14'",  # Sept 2026 JWT/JWKS security fixes
   # urllib3 2.7.0 fixes GHSA-mf9v-mfxr-j63j (decompression-bomb bypass)
   # and GHSA-qccp-gfcp-xxvc (header leak across origins).
   "urllib3>=2.7.0,<3; python_version >= '3.14'",
@@ -615,6 +615,12 @@ default-groups = []
 # covers 3.14 only. Without this the lock must resolve every supported version,
 # where extras that only ever coexist on 3.14 (kittentts vs neutts) conflict.
 environments = ["python_version >= '3.14'"]
+constraint-dependencies = [
+  # CVE-2026-49265: requests-oauthlib permits this PKCE timing-attack fix.
+  # Hermes does not use the changed grant-server or JSONP revocation APIs.
+  # https://github.com/oauthlib/oauthlib/security/advisories/GHSA-xpv3-w29h-x7cv
+  "oauthlib==4.0.0",
+]
 override-dependencies = [
   # discord.py's latest published version, 2.7.1, pins pynacl at <1.6. however, pynacl 1.5.0 has known vulnerabilities.
   # discord.py has updated pynacl to 1.6 on `main`, but has not yet published a patch release.
@@ -692,6 +698,9 @@ exclude-newer = "14 days"
 # 14-day window is younger than the reviewed release.
 
 [tool.uv.exclude-newer-package]
+# CVE-2026-49265: admit the exact reviewed 4.0.0 fix (released 2026-09-28).
+# The normal 14-day quarantine can apply again after 2026-10-12.
+oauthlib = false
 agent-client-protocol = false
 aiohttp = false
 aiohttp-socks = false
