@@ -9,6 +9,9 @@
   disposable sessions that the server has already retired.
 - Late socket events and deferred callbacks from the previous terminal cannot
   clear the replacement connection or send old commands into the new chat.
+- Terminal disconnect diagnostics distinguish an opening timeout from a socket
+  that opened and received output. Logs omit connection URLs, tickets, session
+  identifiers, terminal contents, and arbitrary remote close-reason text.
 - Diagnostic subprocesses use the sealed image's Python environment. Railway
   images regenerate their own version/provenance stamp, and dashboard status
   surfaces display the canonical version, including commit-based builds.
