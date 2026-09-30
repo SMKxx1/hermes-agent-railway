@@ -7,9 +7,14 @@
   model reported by the terminal, and its connection badge follows the terminal.
 - Side-panel reconnects cancel obsolete timers and do not replay events from
   disposable sessions that the server has already retired.
+- Late socket events and deferred callbacks from the previous terminal cannot
+  clear the replacement connection or send old commands into the new chat.
 - Diagnostic subprocesses use the sealed image's Python environment. Railway
   images regenerate their own version/provenance stamp, and dashboard status
   surfaces display the canonical version, including commit-based builds.
+- The terminal welcome banner now receives that same display version through
+  session metadata. An image contract renders the compiled TUI in a real terminal
+  to prevent commit builds from showing `vunknown`.
 - Skill enable/disable switches expose their skill names to assistive technology.
 - Railway CI includes dashboard regressions, type checks, a production web build,
   and image contracts for diagnostic commands and version identity. The deployment

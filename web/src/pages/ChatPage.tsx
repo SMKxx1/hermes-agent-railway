@@ -1327,6 +1327,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       }, PTY_CONNECTING_TIMEOUT_MS);
 
     ws.onopen = () => {
+      if (unmounting) return;
       clearReconnectTimer();
       clearConnectingTimer();
       connectInFlightRef.current = false;
@@ -1372,8 +1373,9 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         const cmd = `/learn ${learnSeed}`.trim();
         // Delay so Ink's composer has mounted and grabbed focus before input.
         setTimeout(() => {
+          if (unmounting || ws.readyState !== WebSocket.OPEN) return;
           try {
-            wsRef.current?.send(cmd + "\r");
+            ws.send(cmd + "\r");
           } catch {
             /* PTY not ready / closed — user can retype */
           }
@@ -1408,6 +1410,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     }
 
     ws.onmessage = (ev) => {
+      if (unmounting) return;
       if (typeof ev.data === "string") {
         // The active-session fallback (no `?resume=` on the URL) tells us
         // via a one-off JSON control frame that a replay is starting (#93518,
@@ -1442,11 +1445,12 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         effectiveResume,
         stickToBottomRef.current,
       )
-        ? () => termRef.current?.scrollToBottom()
+        ? () => term.scrollToBottom()
         : undefined;
       term.write(rendered, () => {
+        if (unmounting) return;
         followScroll?.();
-        if (unmounting || hasRenderedOutput) return;
+        if (hasRenderedOutput) return;
         // A socket open or ANSI-only frame can still leave a blank terminal.
         // Inspect xterm's committed display, not the raw escape-code stream.
         const buffer = term.buffer.active;
@@ -1463,6 +1467,9 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
 
     ws.onclose = (ev) => {
       clearKeepaliveTimer();
+      // close() completes asynchronously. A replacement terminal may already
+      // own the shared socket/timer refs when this retired connection closes.
+      if (unmounting) return;
       // Drain buffered sanitizer state. A buffered partial escape is dropped
       // (writing an unterminated CSI would wedge xterm's parser); a buffered
       // newline run is emitted collapsed.
@@ -1477,9 +1484,6 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       wsRef.current = null;
       connectInFlightRef.current = false;
       clearConnectingTimer();
-      if (unmounting) {
-        return;
-      }
       // Surface the real cause to the browser console on every close so a
       // "chat won't connect" report can be diagnosed without server access.
       // The server sends a machine-parseable reason on every rejection (see

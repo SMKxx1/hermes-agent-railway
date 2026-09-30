@@ -75,6 +75,7 @@ jobs:
           tests/hermes_cli/test_railway_execution.py
           tests/hermes_cli/test_source_launcher_publication.py
           tests/docker/test_railway_build_metadata.py
+          tests/tui_gateway/test_session_version_identity.py
           tests/hermes_cli/test_mcp_catalog.py
           tests/hermes_cli/test_mcp_config.py
           tests/hermes_cli/test_mcp_security.py
