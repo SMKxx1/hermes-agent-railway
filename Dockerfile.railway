@@ -39,6 +39,7 @@ RUN node scripts/build/node-deps.mjs --source /opt/hermes --workspace ui-tui --w
 
 FROM railway-base AS runtime
 ARG RAILWAY_GIT_COMMIT_SHA
+ARG RAILWAY_GIT_BRANCH
 ARG HERMES_CUSTOM_REVISION=${RAILWAY_GIT_COMMIT_SHA:-unversioned-source-build}
 ARG HERMES_SOURCE_URL
 
@@ -59,7 +60,8 @@ COPY --link --chmod=a+rX,go-w . /opt/hermes/
 RUN cd plugins/platforms/photon/sidecar && npm ci --no-audit --fetch-retries=5 \
     && npm cache clean --force
 RUN /opt/hermes/.venv/bin/python -m docker.build_agent \
-    && printf '%s\n' "${HERMES_CUSTOM_REVISION}" > /opt/hermes/.hermes_build_sha
+    && /opt/hermes/.venv/bin/python -m docker.railway_metadata \
+        --revision "${HERMES_CUSTOM_REVISION}" --branch "${RAILWAY_GIT_BRANCH:-}"
 # Tracked non-executable in git; upstream's runtime stage re-copies it executable the same way.
 COPY --link --chmod=0755 docker/entrypoint-dispatch.sh /opt/hermes/docker/entrypoint-dispatch.sh
 COPY --link --chmod=0755 docker/cont-init.d/00-railway-bootstrap /etc/cont-init.d/00-railway-bootstrap

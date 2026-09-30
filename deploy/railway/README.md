@@ -49,6 +49,26 @@ HERMES_DASHBOARD_PUBLIC_URL=https://<your-custom-domain>
 Keep the service on one replica during upgrades. Deploy a new image or source
 revision while retaining `/opt/data`; the image does not auto-update itself.
 
+## Updating an existing service
+
+A GitHub push updates Railway only when automatic deployments are enabled for
+that service and the push reaches its connected branch. A pull-request branch
+does not update a service connected to `main`. Template deployments can have
+automatic deployments disabled even though Source shows a repository and branch;
+check the service's deployment settings instead of assuming the connection is
+enough. See [Railway's autodeploy guide](https://docs.railway.com/deployments/github-autodeploys).
+
+Review and merge the fix or upstream-sync pull request after Railway CI passes.
+With autodeploy enabled, that merge triggers a build; enable **Wait for CI** if
+deployments should also wait for checks on the merged commit. With autodeploy
+disabled, deploy the latest source commit explicitly after merging. Confirm the
+deployment's commit and successful health check before calling the upgrade done.
+
+Keep the existing `/opt/data` volume and authentication variables attached. A
+normal upgrade replaces the container, not the persistent workspace. Commit
+builds expose a `git.<revision>` version so the dashboard can be matched to the
+deployed source without inventing a release number.
+
 ## Optional Railway IaC recipe
 
 `.railway/railway.ts` describes the same service and volume for a **new**

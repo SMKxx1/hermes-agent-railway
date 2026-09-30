@@ -30,7 +30,8 @@ def railway_image():
     image = os.environ.get("HERMES_TEST_IMAGE")
     if not image:
         image = "hermes-public-contract:test"
-        docker("build", "-f", "Dockerfile.railway", "--build-arg", "HERMES_CUSTOM_REVISION=contract-test", "-t", image, ".", timeout=1200)
+        revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        docker("build", "-f", "Dockerfile.railway", "--build-arg", f"HERMES_CUSTOM_REVISION={revision}", "-t", image, ".", timeout=1200)
     return image
 
 
@@ -125,6 +126,52 @@ def test_missing_credentials_stops_before_dashboard(railway_image):
         assert "HERMES_DASHBOARD_READY" not in logs
     finally:
         subprocess.run(["docker", "rm", "-fv", name], capture_output=True)
+
+
+def test_packaged_dashboard_diagnostics_and_identity(railway_image):
+    revision = json.loads(docker("image", "inspect", railway_image))[0]["Config"]["Labels"]["org.opencontainers.image.revision"]
+    docker("run", "--rm", "--network", "none", "--user", "hermes",
+           "-e", "HOME=/tmp/diagnostic-owner", "-e", "HERMES_HOME=/tmp/diagnostic-owner",
+           "--entrypoint", "/opt/hermes/.venv/bin/python", railway_image, "-c", r'''
+import asyncio, json, sys
+from pathlib import Path
+from hermes_cli import banner, web_server_gateway
+from hermes_cli.version_info import get_version_info
+from hermes_cli.web_routers import ops, status
+
+home = Path('/tmp/diagnostic-owner')
+home.mkdir(exist_ok=True)
+identity = get_version_info()
+assert identity.commit == sys.argv[1]
+assert identity.display_version == identity.derived_version == 'git.' + sys.argv[1][:7]
+assert asyncio.run(status.get_status())['version'] == identity.display_version
+assert asyncio.run(status.get_system_stats())['hermes_version'] == identity.display_version
+assert identity.derived_version in banner.format_banner_version_label()
+marker = json.loads(Path('/etc/hermes/image-provenance.json').read_text())
+assert marker['revision'] == identity.commit
+assert marker['version'] == identity.display_version
+
+# Call the same route handlers as the dashboard. No provider credentials or network
+# are available: doctor's unconfigured-service warnings are normal diagnostic output.
+for name, handler, expected in (
+    ('doctor', ops.run_doctor, 'Hermes Doctor'),
+    ('prompt-size', status.run_prompt_size, 'Prompt-size breakdown'),
+):
+    response = asyncio.run(handler())
+    assert response['ok'], response
+    proc = web_server_gateway._ACTION_PROCS[name]
+    try:
+        code = proc.wait(timeout=90)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
+    text = (home/'logs'/web_server_gateway._ACTION_LOG_FILES[name]).read_text()
+    assert 'no dependency environment is committed' not in text, text
+    assert expected in text, text
+    assert code in ({0, 1} if name == 'doctor' else {0}), text
+    assert 'Traceback (most recent call last)' not in text, text
+''', revision, timeout=210)
 
 
 def test_fresh_enrollment_persistence_and_legacy_login_denied(instance):

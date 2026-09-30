@@ -28,7 +28,7 @@ export interface GatewayClientOptions {
   onUnhandledRequest?: JsonRpcRequestChannelOptions['onUnhandledRequest']
   /** Return true to intercept the default closed-state transition. */
   onSocketClose?: (event: { code: number }) => boolean | void
-  /** Fetch `session.events.since` after a reconnect (default). Off for notification-only feeds whose peer never answers RPCs. */
+  /** Track seqs and fetch replay after reconnect (default). Off for notification-only feeds or disposable sessions. */
   replay?: boolean
   requestIdPrefix?: string
   requestTimeoutMs?: number
@@ -452,6 +452,10 @@ export class JsonRpcGatewayClient {
    * (legacy backend, session-less globals) leave the map untouched.
    */
   private recordSeq(event: GatewayEvent): void {
+    if (!this.options.replay) {
+      return
+    }
+
     const sid = event.session_id
     const seq = event.seq
 

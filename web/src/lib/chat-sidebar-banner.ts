@@ -5,9 +5,9 @@
  * Pure helpers so the wording is testable without React.
  */
 
-/** The side panel could not connect; the chat itself is unaffected. */
+/** A failed auxiliary connection says nothing about the terminal's health. */
 export const SIDECAR_DISCONNECTED_MESSAGE =
-  'The chat side panel (model and tool activity) could not connect. Chat still works. Click Reconnect side panel to try again.'
+  'The chat side panel (model and tool activity) could not connect. Check the chat connection status above. Click Reconnect side panel to try again.'
 
 /** Transport-level texts the shared JSON-RPC client can throw. All mean "sidecar down". */
 const SIDECAR_TRANSPORT_ERRORS = [

@@ -5,12 +5,14 @@
  * Two WebSockets, one per concern:
  *
  *   1. **JSON-RPC sidecar** (`GatewayClient` → /api/ws) — a lightweight
- *      session used only for connection state (the "live" badge) and
+ *      session used only for side-panel connection state and
  *      credential warnings. Independent of the PTY pane's session by
  *      design. The model badge does NOT come from here: it reads the
  *      effective config model over REST (`/api/model/info`), and the model
  *      picker writes config over REST (`/api/model/set`) then offers a
- *      dashboard reload so the running chat adopts the new model.
+ *      fresh chat so the running chat adopts the new model. The active chat
+ *      model comes only from the PTY event subscriber below; the connection
+ *      badge comes from ChatPage's terminal state and committed output.
  *
  *   2. **Event subscriber** (/api/events?channel=…) — passive, receives
  *      every dispatcher emit from the PTY-side `tui_gateway.entry` that
@@ -48,6 +50,7 @@ import {
 } from '@/lib/events-reconnect'
 import { credentialWarning, sidecarErrorMessage } from '@/lib/chat-sidebar-banner'
 import { titleFromSessionInfoPayload } from '@/lib/chat-title'
+import type { PtyConnectionState } from '@/lib/pty-reconnect'
 
 import { cn } from '@/lib/utils'
 import { AlertCircle, ChevronDown, KeyRound, RefreshCw } from 'lucide-react'
@@ -82,19 +85,14 @@ const STATE_LABEL: Record<ConnectionState, string> = {
   error: 'error'
 }
 
-const STATE_TONE: Record<ConnectionState, 'secondary' | 'warning' | 'success' | 'destructive'> = {
-  idle: 'secondary',
-  connecting: 'warning',
-  open: 'success',
-  closed: 'secondary',
-  error: 'destructive'
-}
-
 interface ChatSidebarProps {
   channel: string
   /** Chat profile from the dashboard switcher / URL scope. */
   profile?: string
   className?: string
+  /** The terminal owns chat connectivity; the auxiliary socket cannot attest to it. */
+  terminalState?: PtyConnectionState
+  terminalHasOutput?: boolean
   onDashboardNewSessionRequest?: () => void
   onSessionTitleChange?: (title: string | null) => void
 }
@@ -118,27 +116,27 @@ export function ChatSidebar({
   channel,
   profile,
   className,
+  terminalState = 'connecting',
+  terminalHasOutput = false,
   onDashboardNewSessionRequest,
   onSessionTitleChange
 }: ChatSidebarProps) {
   const navigate = useNavigate()
-  // `version` bumps on reconnect (manual button, profile/channel switch) and
-  // re-runs the socket effects. The clients themselves live for the whole
-  // component: the shared client keeps per-session seq watermarks and asks
-  // the gateway to replay the gap on the next `connect()`, which only works
-  // when the SAME instance survives the drop.
+  // Manual reconnect and scope changes rebuild the socket effects. Transient
+  // drops redial only the affected socket; the clients keep generation guards.
   const [version, setVersion] = useState(0)
-  const gw = useMemo(() => new GatewayClient(), [])
+  // Sidecar sessions are retired on disconnect. Replaying their old events
+  // after creating a replacement would grow one useless RPC per retired id.
+  const gw = useMemo(() => new GatewayClient({ replay: false }), [])
   const feed = useMemo(() => new EventsFeedClient(), [])
-  // Sidecar auto-redial budget (#95951). A ref, NOT effect state: the counter
-  // must survive the [gw, version] effect re-runs a redial triggers, or the
-  // budget resets every attempt and never exhausts.
+  // Keep the retry budget across manual effect rebuilds (#95951).
   // Reset on a successful open and on scope switches.
   const sidecarRedialAttemptRef = useRef(0)
   const sidecarGaveUpRef = useRef(false)
 
   const [state, setState] = useState<ConnectionState>('idle')
   const [info, setInfo] = useState<SessionInfo>({})
+  const [chatModel, setChatModel] = useState<{ scope: string; model: string } | null>(null)
   const [modelOpen, setModelOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
   // The badge shows config.yaml's main model (`model.default`) via
@@ -180,8 +178,8 @@ export function ChatSidebar({
   }, [profile])
 
   // Profile or PTY channel change tears down both WebSockets. Bump `version`
-  // (same path as the manual Reconnect button) so the gateway client is
-  // recreated and the events feed resubscribes — otherwise the old events
+  // (same path as the manual Reconnect button) so the gateway reconnects
+  // and the events feed resubscribes — otherwise the old events
   // socket's close handler can leave a stale error banner after a switch.
   const scopeKey = `${channel}\0${profile ?? ''}`
   const prevScopeKey = useRef<string | null>(null)
@@ -201,6 +199,7 @@ export function ChatSidebar({
 
   useEffect(() => {
     let cancelled = false
+    let connectionError: string | null = null
     queueMicrotask(() => {
       if (cancelled) return
       setInfo({})
@@ -221,6 +220,8 @@ export function ChatSidebar({
       const message = ev.payload?.message
 
       if (message) {
+        // A newer gateway/credential warning owns the banner now.
+        connectionError = null
         console.warn(`[chat-sidebar] sidecar error: ${message}`)
         setError(sidecarErrorMessage(message))
       }
@@ -233,10 +234,18 @@ export function ChatSidebar({
     // capped at SIDE_CAR_MAX_RECONNECT_ATTEMPTS; after that the manual
     // Reconnect affordance stays the only path. A successful open resets
     // the counter; unmount or a scope switch (version bump) cancels the
-    // pending timer because this effect tears down with the old client.
+    // pending timer. Redial in this effect so a sidecar drop does not also
+    // restart the independent events feed.
     let redialTimer: ReturnType<typeof setTimeout> | null = null;
+    const clearRedial = () => {
+      if (redialTimer !== null) {
+        clearTimeout(redialTimer);
+        redialTimer = null;
+      }
+    };
     const offRedial = gw.onState((s) => {
       if (s === "open") {
+        clearRedial();
         sidecarRedialAttemptRef.current = 0;
         if (sidecarGaveUpRef.current) {
           sidecarGaveUpRef.current = false;
@@ -252,9 +261,6 @@ export function ChatSidebar({
       if (cancelled || redialTimer) {
         return;
       }
-      // The attempt counter lives in a ref: each redial rebuilds the client
-      // and re-runs this effect, so a closure-local counter would reset and
-      // the budget would never exhaust (#95951).
       if (sidecarRedialAttemptRef.current >= SIDE_CAR_MAX_RECONNECT_ATTEMPTS) {
         // Mirror the events feed's give-up contract: say so once, then the
         // manual Reconnect affordance stays the only path. Cleared again if
@@ -272,7 +278,7 @@ export function ChatSidebar({
       redialTimer = setTimeout(() => {
         redialTimer = null;
         if (!cancelled) {
-          setVersion((v) => v + 1);
+          void connect();
         }
       }, delayMs);
     });
@@ -281,28 +287,39 @@ export function ChatSidebar({
     // signals (connection state, credential warnings). It's independent of the
     // PTY pane's session by design. The model picker no longer rides this
     // session — it writes config.yaml over REST — so we don't track its id.
-    gw.connect()
-      .then(() => {
+    const connect = async () => {
+      // onState immediately reports the old state. A manual reconnect may
+      // subscribe while CLOSED and queue a retry before this dial starts;
+      // discard it so a slow handshake cannot be cut off by that stale timer.
+      clearRedial()
+      if (cancelled) return
+      try {
+        await gw.connect()
         if (cancelled) {
           return
         }
         // close_on_disconnect: the gateway reaps this sidecar session (and its
         // slash_worker subprocess) when the WS drops, instead of leaking it.
-        return gw.request<{ session_id: string }>('session.create', sidecarSessionCreateParams(profile))
-      })
-      .catch((e: Error) => {
-        if (!cancelled) {
-          console.warn(`[chat-sidebar] sidecar connect failed: ${e.message}`)
-          setError(sidecarErrorMessage(e.message))
+        await gw.request<{ session_id: string }>('session.create', sidecarSessionCreateParams(profile))
+        if (!cancelled && connectionError !== null) {
+          const recoveredError = connectionError
+          connectionError = null
+          setError(current => current === recoveredError ? null : current)
         }
-      })
+      } catch (e) {
+        if (!cancelled) {
+          const message = e instanceof Error ? e.message : String(e)
+          console.warn(`[chat-sidebar] sidecar connect failed: ${message}`)
+          connectionError = sidecarErrorMessage(message)
+          setError(connectionError)
+        }
+      }
+    }
+    void connect()
 
     return () => {
       cancelled = true
-      if (redialTimer) {
-        clearTimeout(redialTimer)
-        redialTimer = null
-      }
+      clearRedial()
       offRedial()
       offState()
       offSessionInfo()
@@ -403,6 +420,12 @@ export function ChatSidebar({
     })
 
     const offSessionInfo = feed.on('session.info', ev => {
+      if (unmounting) return
+      const model = ev.payload?.model
+      if (typeof model === 'string' && model.trim()) {
+        setChatModel({ scope: `${channel}\0${profile ?? ''}`, model: model.trim() })
+        setModelNotice(null)
+      }
       const title = titleFromSessionInfoPayload(ev.payload)
       if (title !== undefined) {
         onSessionTitleChange?.(title)
@@ -426,7 +449,7 @@ export function ChatSidebar({
       offNewSession()
       feed.close()
     }
-  }, [channel, feed, onDashboardNewSessionRequest, onSessionTitleChange, version])
+  }, [channel, feed, profile, onDashboardNewSessionRequest, onSessionTitleChange, version])
 
   // Seed the badge on mount and re-read it whenever the sockets are rebuilt
   // (a profile/channel switch bumps `version`).
@@ -441,10 +464,16 @@ export function ChatSidebar({
     setVersion(v => v + 1)
   }, [])
 
-  // The picker writes config.yaml over REST and reloads — it doesn't ride the
+  // The picker writes config.yaml over REST — it doesn't ride the
   // sidecar gateway session, so it's available whenever the sidebar is mounted.
-  const modelName = effectiveModel || info.model || '—'
+  const modelName = effectiveModel || '—'
   const modelLabel = modelName.split('/').slice(-1)[0] ?? '—'
+  const activeModel = chatModel?.scope === scopeKey ? chatModel.model : null
+  const terminalLabel = terminalState === 'open'
+    ? (terminalHasOutput ? 'connected' : 'starting chat')
+    : terminalState === 'closed' ? 'disconnected' : terminalState
+  const terminalTone = terminalState === 'open' && terminalHasOutput ? 'success'
+    : terminalState === 'closed' || terminalState === 'ended' ? 'destructive' : 'warning'
   const credential = credentialWarning(info.credential_warning)
   const banner = error ?? credential?.message ?? null
   const showReload = isEventsAuthRejectionMessage(error)
@@ -458,7 +487,7 @@ export function ChatSidebar({
     >
       <Card className="flex items-center justify-between gap-2 px-3 py-2">
         <div className="min-w-0 flex-1">
-          <div className="text-display text-xs tracking-wider text-text-tertiary">model</div>
+          <div className="text-display text-xs tracking-wider text-text-tertiary">default model</div>
 
           <Button
             ghost
@@ -477,10 +506,16 @@ export function ChatSidebar({
               <ChevronDown className="size-3.5 shrink-0 text-text-secondary" />
             </span>
           </Button>
+          <div className="mt-1 text-xs text-text-secondary">
+            Chat model: {activeModel ?? 'not yet confirmed'}
+          </div>
+          {state !== 'open' && (
+            <div className="text-xs text-text-secondary">Side panel: {STATE_LABEL[state]}</div>
+          )}
         </div>
 
-        <Badge tone={STATE_TONE[state]} className="shrink-0">
-          {STATE_LABEL[state]}
+        <Badge tone={terminalTone} className="shrink-0" aria-label="Chat connection">
+          {terminalLabel}
         </Badge>
       </Card>
 
@@ -492,7 +527,7 @@ export function ChatSidebar({
             refreshKey={modelRefreshKey}
             onChanged={effort =>
               setModelNotice(
-                `Reasoning effort set to ${effort}. Run /new or refresh the page to apply it to this chat.`
+                `Reasoning effort set to ${effort}. Start a new chat to apply it.`
               )
             }
           />
@@ -589,10 +624,16 @@ export function ChatSidebar({
 
       <ModelReloadConfirm
         model={pendingReloadModel}
+        onConfirm={onDashboardNewSessionRequest ? () => {
+          const model = pendingReloadModel
+          setPendingReloadModel(null)
+          setModelNotice(`Starting a fresh chat with ${model}…`)
+          onDashboardNewSessionRequest()
+        } : undefined}
         onCancel={() => {
           const m = pendingReloadModel
           setPendingReloadModel(null)
-          setModelNotice(`Model set to ${m}. Run /new or refresh the page to apply it to this chat.`)
+          setModelNotice(`Default model set to ${m}. This chat keeps its current model; start a new chat to apply the change.`)
         }}
       />
     </aside>

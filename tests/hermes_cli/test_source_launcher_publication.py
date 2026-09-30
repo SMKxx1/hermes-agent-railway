@@ -466,6 +466,42 @@ def test_external_interpreter_keeps_its_owned_dependencies(tmp_path, monkeypatch
     assert result.stdout.strip() == "external-runtime-ready"
 
 
+@pytest.mark.parametrize("layout", ["fixed", "contained"])
+def test_packaged_dashboard_action_uses_its_shipped_interpreter(tmp_path, monkeypatch, layout):
+    """Diagnostics must boot the sealed environment, even when PM tools also ship."""
+    import venv
+
+    from hermes_cli import web_server, web_server_gateway
+
+    repo, home, _ = fixture_tree(tmp_path, monkeypatch)
+    payload = repo if layout == "fixed" else repo.parent
+    environment = payload / "packaged-deps"
+    venv.EnvBuilder(with_pip=False).create(environment)
+    python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    site = site_packages(environment)
+    (site / "selected_probe.py").write_text("VALUE = 'packaged'\n", encoding="utf-8")
+    (payload / "manifest.json").write_text(json.dumps({
+        "schema": 1, "repo": str(repo.relative_to(payload)), "venv": environment.name,
+        "store": "tools", "runtime": {"storePython": str(python.relative_to(payload))},
+    }), encoding="utf-8")
+    (repo / "install-stamp.json").write_text(json.dumps({"updateMechanism": "external"}), encoding="utf-8")
+    monkeypatch.setattr(web_server, "PROJECT_ROOT", repo)
+    monkeypatch.setattr(web_server_gateway, "_ACTION_LOG_DIR", home / "logs")
+    for command in ("doctor", "prompt-size"):
+        proc = web_server_gateway._spawn_hermes_action([command], command)
+        try:
+            assert proc.wait(timeout=30) == 7
+            log = (home / "logs" / web_server_gateway._ACTION_LOG_FILES[command]).read_text(encoding="utf-8")
+            receipt = json.loads(log.splitlines()[-1])
+            assert receipt["value"] == "packaged"
+            assert receipt["exe"] == str(python)
+            assert receipt["argv"] == [command]
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=30)
+
+
 @pytest.mark.platforms("posix")
 @pytest.mark.spawns_gateway_lookalike
 def test_service_survives_python_tool_replacement(tmp_path, monkeypatch):

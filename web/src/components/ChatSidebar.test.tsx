@@ -195,8 +195,8 @@ describe('ChatSidebar event socket', () => {
     expect(gatewayMocks.connect).toHaveBeenCalledTimes(1);
 
     // A service-restart close reports 'closed'. The connection owner
-    // schedules a version bump after the 250ms first-attempt backoff,
-    // which rebuilds the client and dials again. (onState call [0] is the
+    // schedules a redial after the 250ms first-attempt backoff.
+    // (onState call [0] is the
     // state badge subscription; the redial owner is call [1].)
     const stateHandler = gatewayMocks.onState.mock
       .calls[1][0] as (s: string) => void;
@@ -267,9 +267,7 @@ describe('ChatSidebar event socket reconnect', () => {
 
   it("surfaces a gave-up banner when the sidecar redial budget is exhausted (#95951)", async () => {
     // The file-wide onState mock immediately reports "open" to every new
-    // subscription — that would reset the sidecar's redial counter after
-    // every rebuild and the budget would never exhaust. Collect the
-    // handlers and drive the state sequence ourselves.
+    // subscription. Collect the handlers and drive failed attempts ourselves.
     const originalImpl = gatewayMocks.onState.getMockImplementation();
     const stateHandlers: Array<(s: string) => void> = [];
     gatewayMocks.onState.mockImplementation((handler: (s: string) => void) => {
@@ -281,10 +279,11 @@ describe('ChatSidebar event socket reconnect', () => {
       const { ChatSidebar } = await import("./ChatSidebar");
       await render(<ChatSidebar channel="chat-1" />);
       expect(stateHandlers.length).toBeGreaterThanOrEqual(2);
+      // This test isolates the sidecar's retry budget. Its independent feed
+      // stays healthy rather than timing out during the simulated backoffs.
+      await act(async () => FakeWebSocket.instances[0].emit('open', {}));
 
-      // Exhaust the budget: each failed attempt re-runs the socket effect
-      // (new handler subscribed), so drive the LATEST subscription each
-      // round and advance past that round's backoff (250 * 2^n, capped 3s).
+      // Exhaust the budget and advance past each backoff (250 * 2^n, capped 3s).
       for (let round = 0; round < 5; round += 1) {
         const handler = stateHandlers[stateHandlers.length - 1];
         await act(async () => {
@@ -559,9 +558,8 @@ describe('ChatSidebar event socket reconnect', () => {
     expect(FakeWebSocket.instances).toHaveLength(2)
   })
 
-  it('reuses one JSON-RPC client across reconnects so seq replay can fire', async () => {
-    // The shared client only asks `session.events.since` for the gap when the
-    // instance that recorded the watermarks is the one that redials.
+  it('reuses one JSON-RPC client across manual reconnects', async () => {
+    // Retain the shared client's generation guards across socket replacement.
     gatewayMocks.constructed = 0
     await renderSidebar()
     expect(gatewayMocks.constructed).toBe(1)

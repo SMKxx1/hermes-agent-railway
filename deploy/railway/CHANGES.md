@@ -1,5 +1,20 @@
 # Railway distribution changes
 
+## Dashboard reliability and packaged diagnostics (2026-09-30)
+
+- Model switching starts a fresh terminal instead of reattaching the previous
+  session on reload. The sidebar distinguishes the configured default from the
+  model reported by the terminal, and its connection badge follows the terminal.
+- Side-panel reconnects cancel obsolete timers and do not replay events from
+  disposable sessions that the server has already retired.
+- Diagnostic subprocesses use the sealed image's Python environment. Railway
+  images regenerate their own version/provenance stamp, and dashboard status
+  surfaces display the canonical version, including commit-based builds.
+- Skill enable/disable switches expose their skill names to assistive technology.
+- Railway CI includes dashboard regressions, type checks, a production web build,
+  and image contracts for diagnostic commands and version identity. The deployment
+  guide explains that a GitHub connection alone does not enable automatic deploys.
+
 ## Application security regressions (2026-09-29)
 
 - Feishu webhook requests authenticate before consuming the shared delivery
