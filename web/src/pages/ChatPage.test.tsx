@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 import { act, type ReactNode } from "react";
+import { createServer } from "node:http";
+import { createRequire } from "node:module";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -280,6 +282,76 @@ afterEach(async () => {
 });
 
 describe("ChatPage", () => {
+  it("keeps the replacement PTY attached when the retired socket closes after a model switch", async () => {
+    type ServerSocket = {
+      pause(): void;
+      resume(): void;
+      send(data: string): void;
+      terminate(): void;
+    };
+    const transport = createRequire(import.meta.url)("ws") as {
+      WebSocket: typeof WebSocket;
+      WebSocketServer: new (options: { server: ReturnType<typeof createServer> }) => {
+        on(event: "connection", listener: (socket: ServerSocket) => void): void;
+        close(callback: () => void): void;
+      };
+    };
+    const clients: WebSocket[] = [];
+    class RealWebSocket extends transport.WebSocket {
+      constructor(url: string) {
+        super(url);
+        // Match browser EventTarget semantics when cleanup closes CONNECTING.
+        this.addEventListener("error", () => {});
+        clients.push(this);
+      }
+    }
+    const http = createServer();
+    const server = new transport.WebSocketServer({ server: http });
+    const sockets: ServerSocket[] = [];
+    server.on("connection", socket => {
+      sockets.push(socket);
+      // Hold the old close handshake across the new connection. Real browser
+      // close events are asynchronous; the ordinary socket mock omits them.
+      if (sockets.length === 1) socket.pause();
+      socket.send("Chat ready");
+    });
+    await new Promise<void>(resolve => http.listen(0, "127.0.0.1", resolve));
+    const address = http.address();
+    if (!address || typeof address === "string") throw new Error("Missing test port");
+    vi.stubGlobal("WebSocket", RealWebSocket);
+    apiMocks.buildWsUrl.mockImplementation(async (_path, params) =>
+      `ws://127.0.0.1:${address.port}/api/pty?${new URLSearchParams(params)}`,
+    );
+    try {
+      const { default: ChatPage } = await import("./ChatPage");
+      await render(<MemoryRouter initialEntries={["/chat"]}><ChatPage isActive /></MemoryRouter>);
+      const apply = container.querySelector<HTMLButtonElement>('[data-testid="chat-status-harness"]')!;
+      await act(async () => {
+        await vi.waitFor(() => expect(clients[0]?.readyState).toBe(1));
+      });
+      await act(async () => apply.click());
+      await act(async () => {
+        await vi.waitFor(() => expect(clients[1]?.readyState).toBe(1));
+      });
+      const retiredClosed = new Promise<void>(resolve => clients[0].addEventListener("close", () => resolve(), { once: true }));
+      await act(async () => {
+        sockets[0].resume();
+        await retiredClosed;
+      });
+      await act(async () => window.dispatchEvent(new Event("focus")));
+      // A focus event must leave the healthy replacement connected, without
+      // constructing another terminal or requiring a server buffer replay.
+      expect(apiMocks.buildWsUrl).toHaveBeenCalledTimes(2);
+      expect(clients[1].readyState).toBe(1);
+      expect(apply.dataset.terminalOutput).toBe("true");
+    } finally {
+      await act(async () => root.unmount());
+      for (const socket of sockets) socket.terminate();
+      await new Promise<void>(resolve => server.close(resolve));
+      await new Promise<void>(resolve => http.close(() => resolve()));
+    }
+  });
+
   it("starts a fresh terminal for a saved model and reports readiness from terminal output", async () => {
     let tokenByte = 20;
     vi.stubGlobal("crypto", {
@@ -323,6 +395,49 @@ describe("ChatPage", () => {
     const nextParams = apiMocks.buildWsUrl.mock.calls.at(-1)![1];
     expect(nextParams).not.toHaveProperty("fresh");
     expect(nextParams.attach).toBe(firstParams.attach);
+  });
+
+  it.each([false, true])("delivers delayed learning input only to its original live chat (replaced=%s)", async replaced => {
+    vi.useFakeTimers();
+    try {
+      const { default: ChatPage } = await import("./ChatPage");
+      await render(<MemoryRouter initialEntries={["/chat?learn=learn-this"]}><ChatPage isActive /></MemoryRouter>);
+      await act(async () => FakeWebSocket.instances[0].onopen?.());
+      if (replaced) {
+        const apply = container.querySelector<HTMLButtonElement>('[data-testid="chat-status-harness"]')!;
+        await act(async () => apply.click());
+        await act(async () => FakeWebSocket.instances[1].onopen?.());
+      }
+      await act(async () => vi.advanceTimersByTimeAsync(800));
+      const learningInput = FakeWebSocket.instances.flatMap(socket => socket.send.mock.calls)
+        .map(([data]) => data as string).filter(data => data.startsWith("/learn "));
+      expect(learningInput).toEqual(replaced ? [] : ["/learn learn-this\r"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not follow old replay output after a fresh terminal replaces it", async () => {
+    const commits: Array<() => void> = [];
+    const write = vi.spyOn(FakeTerminal.prototype, "write").mockImplementation((_text, commit) => {
+      if (commit) commits.push(commit);
+    });
+    const scroll = vi.spyOn(FakeTerminal.prototype, "scrollToBottom");
+    try {
+      const { default: ChatPage } = await import("./ChatPage");
+      await render(<MemoryRouter initialEntries={["/chat?resume=old-session"]}><ChatPage isActive /></MemoryRouter>);
+      await act(async () => FakeWebSocket.instances[0].onmessage?.({ data: "Earlier output" }));
+      expect(commits).toHaveLength(1);
+      const apply = container.querySelector<HTMLButtonElement>('[data-testid="chat-status-harness"]')!;
+      await act(async () => apply.click());
+      scroll.mockClear();
+      await act(async () => commits[0]());
+      expect(scroll).not.toHaveBeenCalled();
+      expect(apply.dataset.terminalOutput).toBe("false");
+    } finally {
+      write.mockRestore();
+      scroll.mockRestore();
+    }
   });
 
   it("sends a PTY keepalive frame every 20 seconds while the socket is open", async () => {

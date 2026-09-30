@@ -8,6 +8,7 @@ import html
 import http.cookiejar
 import json
 import os
+from pathlib import Path
 import re
 import subprocess
 import time
@@ -172,6 +173,76 @@ for name, handler, expected in (
     assert code in ({0, 1} if name == 'doctor' else {0}), text
     assert 'Traceback (most recent call last)' not in text, text
 ''', revision, timeout=210)
+
+
+def test_packaged_tui_renders_build_identity(railway_image):
+    # Exercise the compiled Ink client and its real Python session.info producer,
+    # not the classic CLI banner formatter (which is a different user surface).
+    terminal = Path(__file__).resolve().parents[1] / "e2e/core/terminal/_vt.py"
+    docker("run", "--rm", "--network", "none", "--user", "hermes",
+           "--mount", f"type=bind,source={terminal},target=/tmp/terminal_vt.py,readonly",
+           "--entrypoint", "/opt/hermes/.venv/bin/python", railway_image, "-c", r'''
+import errno, os, pty, select, signal, subprocess, sys, termios, time
+from pathlib import Path
+from hermes_cli.version_info import get_version_info
+sys.path.insert(0, '/tmp')
+from terminal_vt import Screen
+
+home = Path('/tmp/tui-banner-owner')
+home.mkdir()
+(home/'config.yaml').write_text("""model:
+  default: openai/gpt-4o-mini
+  provider: openrouter
+updates:
+  check: false
+auxiliary:
+  title_generation:
+    enabled: false
+memory:
+  memory_enabled: false
+  user_profile_enabled: false
+""")
+env = {**os.environ, 'HOME': str(home), 'HERMES_HOME': str(home),
+       'HERMES_PYTHON': '/opt/hermes/.venv/bin/python',
+       'HERMES_PYTHON_SRC_ROOT': '/opt/hermes', 'HERMES_CWD': str(home),
+       'TERM': 'xterm-256color', 'HERMES_TUI_DASHBOARD': '1',
+       'OPENROUTER_API_KEY': 'local-test-not-a-real-key'}
+master, slave = pty.openpty()
+termios.tcsetwinsize(slave, (45, 160))
+proc = subprocess.Popen(['node', '/opt/hermes/ui-tui/dist/entry.js'],
+                        stdin=slave, stdout=slave, stderr=slave, env=env,
+                        cwd=home, start_new_session=True)
+os.close(slave)
+screen, text = Screen(45, 160), ''
+expected = 'Hermes Agent v' + get_version_info().display_version
+try:
+    deadline = time.monotonic() + 45
+    while time.monotonic() < deadline and proc.poll() is None:
+        if not select.select([master], [], [], .25)[0]:
+            continue
+        try:
+            screen.feed(os.read(master, 65536))
+        except OSError as exc:
+            if exc.errno == errno.EIO:
+                break
+            raise
+        text = '\n'.join(screen.display())
+        if expected in text or 'Hermes Agent vunknown' in text:
+            break
+    headers = [line.strip() for line in screen.display() if 'Hermes Agent' in line]
+    details = f'{text[-2000:]}\nExpected: {expected!r}\nRendered headers: {headers!r}'
+    assert expected in text, details
+    assert 'Hermes Agent vunknown' not in text, details
+finally:
+    if proc.poll() is None:
+        os.killpg(proc.pid, signal.SIGTERM)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait(timeout=5)
+    os.close(master)
+''', timeout=65)
 
 
 def test_fresh_enrollment_persistence_and_legacy_login_denied(instance):
