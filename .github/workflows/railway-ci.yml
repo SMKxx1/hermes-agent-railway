@@ -11,6 +11,35 @@ permissions:
   contents: read
 
 jobs:
+  dashboard-contracts:
+    name: Dashboard contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up locked Node and npm
+        uses: ./.github/actions/setup-pm
+        with:
+          toolchain: node
+
+      - name: Install locked workspace dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Check dashboard and shared gateway types
+        run: |
+          npm run typecheck --workspace web
+          npm run typecheck --workspace apps/shared
+
+      - name: Run dashboard regressions
+        run: npm run test --workspace web
+
+      - name: Build production dashboard
+        run: npm run build --workspace web
+
   public-deploy-contracts:
     name: Public deployment contracts
     runs-on: ubuntu-latest
@@ -44,6 +73,8 @@ jobs:
           tests/hermes_cli/test_railway_bootstrap.py
           tests/hermes_cli/test_railway_auth_modes.py
           tests/hermes_cli/test_railway_execution.py
+          tests/hermes_cli/test_source_launcher_publication.py
+          tests/docker/test_railway_build_metadata.py
           tests/hermes_cli/test_mcp_catalog.py
           tests/hermes_cli/test_mcp_config.py
           tests/hermes_cli/test_mcp_security.py

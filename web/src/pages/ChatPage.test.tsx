@@ -9,6 +9,7 @@ import {
   PTY_RECONNECT_MAX_MS,
   PTY_TICKET_TIMEOUT_MS,
 } from "@/lib/pty-reconnect";
+import { freshChatUrl } from "@/lib/fresh-chat";
 
 class FakeFitAddon {
   fit() {}
@@ -21,6 +22,7 @@ class FakeWebglAddon {
 }
 
 class FakeTerminal {
+  renderedText = "";
   options: Record<string, unknown>;
   rows = 24;
   cols = 80;
@@ -70,7 +72,7 @@ class FakeTerminal {
   get buffer() {
     // Minimal active-buffer surface for the resume follow-scroll pin
     // (isViewportPinnedToBottom reads viewportY/baseY).
-    return { active: { baseY: 0, viewportY: 0 } };
+    return { active: { baseY: 0, viewportY: 0, getLine: () => ({ translateToString: () => this.renderedText }) } };
   }
 
   scrollToBottom() {}
@@ -81,12 +83,17 @@ class FakeTerminal {
 
   refresh() {}
 
-  write() {}
+  write(text: string, callback?: () => void) {
+    this.renderedText = text;
+    callback?.();
+  }
 }
 
 const maybeReloadForLoopbackWsAuthFailure = vi.fn(() => false);
 const apiMocks = vi.hoisted(() => ({
-  buildWsUrl: vi.fn(async () => "ws://localhost/api/pty?channel=chat-1"),
+  buildWsUrl: vi.fn<(path: string, params: Record<string, string>) => Promise<string>>(async () => "ws://localhost/api/pty?channel=chat-1"),
+  getSessionDetail: vi.fn(async () => ({ title: "Previous chat" })),
+  getSessionLatestDescendant: vi.fn(async () => ({ session_id: "old-session" })),
 }));
 const uploadChatImage = vi.hoisted(() =>
   vi.fn(async () => ({ path: "/tmp/pasted.png" })),
@@ -103,7 +110,11 @@ vi.mock("@xterm/addon-web-links", () => ({ WebLinksAddon: class {} }));
 vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: FakeWebglAddon }));
 vi.mock("@xterm/xterm", () => ({ Terminal: FakeTerminal }));
 vi.mock("@/components/ChatSidebar", () => ({
-  ChatSidebar: () => null,
+  ChatSidebar: ({ onDashboardNewSessionRequest, terminalState, terminalHasOutput }: {
+    onDashboardNewSessionRequest: () => void;
+    terminalState: string;
+    terminalHasOutput: boolean;
+  }) => <button data-testid="chat-status-harness" data-terminal-state={terminalState} data-terminal-output={String(terminalHasOutput)} onClick={onDashboardNewSessionRequest}>Apply saved model</button>,
 }));
 vi.mock("@/components/ChatSessionList", () => ({
   ChatSessionList: () => null,
@@ -269,6 +280,51 @@ afterEach(async () => {
 });
 
 describe("ChatPage", () => {
+  it("starts a fresh terminal for a saved model and reports readiness from terminal output", async () => {
+    let tokenByte = 20;
+    vi.stubGlobal("crypto", {
+      getRandomValues: (values: Uint8Array) => values.fill(++tokenByte),
+      randomUUID: () => `chat-${++tokenByte}`,
+    });
+    const { default: ChatPage } = await import("./ChatPage");
+    await render(<MemoryRouter initialEntries={["/chat?resume=old-session"]}><ChatPage isActive /></MemoryRouter>);
+    const original = FakeWebSocket.instances[0];
+    const firstParams = apiMocks.buildWsUrl.mock.calls[0][1];
+    const apply = container.querySelector<HTMLButtonElement>('[data-testid="chat-status-harness"]')!;
+    await act(async () => apply.click());
+    const freshParams = apiMocks.buildWsUrl.mock.calls.at(-1)![1];
+    expect(freshParams).toMatchObject({ fresh: "1" });
+    expect(freshParams).not.toHaveProperty("resume");
+    expect(freshParams.attach).not.toBe(firstParams.attach);
+    expect(freshParams.channel).not.toBe(firstParams.channel);
+    expect(original.readyState).toBe(3);
+    const fresh = FakeWebSocket.instances.at(-1)!;
+    await act(async () => fresh.onopen?.());
+    expect(apply.dataset.terminalState).toBe("open");
+    expect(apply.dataset.terminalOutput).toBe("false");
+    await act(async () => fresh.onmessage?.({ data: "New model ready" }));
+    expect(apply.dataset.terminalOutput).toBe("true");
+    await act(async () => fresh.onclose?.({ code: 1006, reason: "", wasClean: false }));
+    expect(apply.dataset.terminalState).toBe("reconnecting");
+  });
+
+  it("consumes a cross-page model change once, preserving the new terminal on reconnect", async () => {
+    const target = new URL(freshChatUrl("https://dashboard.example/hermes/models?profile=work&resume=old", "/hermes"));
+    expect(target.pathname).toBe("/hermes/chat");
+    expect(target.searchParams.get("profile")).toBe("work");
+    expect(target.searchParams.has("resume")).toBe(false);
+    const { default: ChatPage } = await import("./ChatPage");
+    await render(<MemoryRouter initialEntries={[target.pathname + target.search]}><ChatPage isActive /></MemoryRouter>);
+    const firstParams = apiMocks.buildWsUrl.mock.calls[0][1];
+    expect(firstParams.fresh).toBe("1");
+    const first = FakeWebSocket.instances[0];
+    await act(async () => first.onclose?.({ code: 1006, reason: "", wasClean: false }));
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2));
+    const nextParams = apiMocks.buildWsUrl.mock.calls.at(-1)![1];
+    expect(nextParams).not.toHaveProperty("fresh");
+    expect(nextParams.attach).toBe(firstParams.attach);
+  });
+
   it("sends a PTY keepalive frame every 20 seconds while the socket is open", async () => {
     vi.useFakeTimers();
     try {

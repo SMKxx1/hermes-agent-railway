@@ -20,7 +20,7 @@ from pathlib import Path
 if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pm.environments import store_root
+from pm.environments import payload_python, store_root
 
 
 def _inline_string_literal(value: str) -> str:
@@ -41,7 +41,7 @@ def runtime_command(repo_root: Path, args=(), *, module: str = "hermes_cli.main"
     No selected generation or ambient PYTHONPATH is captured in the command.
     """
     root = Path(repo_root).resolve()
-    python = python or resolve_store_python(root) or Path(sys.executable)
+    python = python or payload_python(root) or resolve_store_python(root) or Path(sys.executable)
     entry = f"exec({_inline_string_literal(code)})" if code is not None else (
         f"runpy.run_module({_inline_string_literal(module)}, run_name='__main__', alter_sys=True)")
     default_home = (_inline_string_literal(str(home)) if home is not None else

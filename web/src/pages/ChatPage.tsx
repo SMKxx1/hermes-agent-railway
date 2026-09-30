@@ -108,10 +108,8 @@ import { errorMessage } from "@/lib/api-error";
 // second tab — including a Chrome "Duplicate tab" — gets its own PTY instead of
 // taking over this one. See #115304.
 
-// Channel id ties this chat tab's PTY child (publisher) to its sidebar
-// (subscriber).  Generated once per mount so a tab refresh starts a fresh
-// channel — the previous PTY child terminates with the old WS, and its
-// channel auto-evicts when no subscribers remain.
+// Channel id ties this chat's PTY child (publisher) to its sidebar (subscriber).
+// Explicit fresh starts rotate it too, isolating late events from the old chat.
 function generateChannelId(scope?: string): string {
   const prefix = scope ? "chat" : "chat-fresh";
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -251,6 +249,8 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   const mobileReplacementInputUntilRef = useRef(0);
   const [ptyState, setPtyState] =
     useState<PtyConnectionState>("connecting");
+  const [terminalHasOutput, setTerminalHasOutput] = useState(false);
+  const [freshSessionNonce, setFreshSessionNonce] = useState(0);
   const ptyStateRef = useRef<PtyConnectionState>("connecting");
   // True until the first real PTY payload arrives for a resumed session.
   // Covers the blank terminal + blinking-cursor window so users don't think
@@ -288,6 +288,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   }, [clearReconnectTimer]);
   const startFreshPty = useCallback(() => {
     forceFreshPtyRef.current = true;
+    setFreshSessionNonce((n) => n + 1);
     reconnectAttemptRef.current = 0;
     clearReconnectTimer();
     blockedInputNoticeRef.current = false;
@@ -301,7 +302,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   }, [clearReconnectTimer]);
   const startFreshDashboardChat = useCallback(() => {
     const next = new URLSearchParams(searchParams);
-
+    const leavingResume = next.has("resume");
     next.delete("resume");
     forceFreshPtyRef.current = true;
     reconnectAttemptRef.current = 0;
@@ -314,7 +315,13 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     setBannerAction(null);
     setReconnectGaveUp(false);
     setPtyState("connecting");
-    setReconnectNonce((n) => n + 1);
+    // Removing a resume target already changes the connection identity. Router
+    // navigation can commit after local state: bumping a nonce as well would
+    // first start against the old resume URL and consume the fresh intent.
+    if (!leavingResume) {
+      setFreshSessionNonce((n) => n + 1);
+      setReconnectNonce((n) => n + 1);
+    }
   }, [clearReconnectTimer, searchParams, setSearchParams]);
   // Clear mobile-input tracking refs when the tab is hidden so stale state
   // from a previous /chat visit doesn't cause the mobile-replacement logic
@@ -410,8 +417,8 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     setWorkspaceCwdState(readStoredWorkspace(scopedProfile));
   }
   const channel = useMemo(
-    () => generateChannelId(`${resumeParam ?? ""}\0${scopedProfile}`),
-    [resumeParam, scopedProfile],
+    () => generateChannelId(`${resumeParam ?? ""}\0${scopedProfile}\0${freshSessionNonce}`),
+    [resumeParam, scopedProfile, freshSessionNonce],
   );
   const titleScope = `${channel}\0${reconnectNonce}`;
   const sessionTitle =
@@ -1126,6 +1133,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     // ``return cleanup`` stays at the top level; handlers + disposables
     // are hoisted to ``let`` bindings the cleanup closes over.
     let unmounting = false;
+    let hasRenderedOutput = false;
     // The implicit active-session fallback (no `?resume=` on the URL) only
     // becomes known once the server's control frame arrives (see
     // `ws.onmessage` below) — everything gated on "is this a resume replay"
@@ -1171,8 +1179,17 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     } else {
       setResumeHydrating(false);
     }
-    const forceFresh = forceFreshPtyRef.current;
+    const forceFresh = forceFreshPtyRef.current || searchParams.get("fresh") === "1";
     forceFreshPtyRef.current = false;
+    // Model changes from another page land here with one-shot fresh intent.
+    // Clearing it does not rebuild this effect; ordinary reconnects reuse the
+    // newly created terminal and its attach token.
+    if (searchParams.has("fresh")) {
+      const next = new URLSearchParams(searchParams);
+      next.delete("fresh");
+      setSearchParams(next, { replace: true });
+    }
+    setTerminalHasOutput(false);
     // A connect attempt is now in flight — set synchronously (before the async
     // socket-open IIFE below awaits its ticket URL) so a page-resume event in
     // that gap doesn't fire a redundant reconnect (wsRef isn't assigned yet).
@@ -1427,7 +1444,20 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       )
         ? () => termRef.current?.scrollToBottom()
         : undefined;
-      term.write(rendered, followScroll);
+      term.write(rendered, () => {
+        followScroll?.();
+        if (unmounting || hasRenderedOutput) return;
+        // A socket open or ANSI-only frame can still leave a blank terminal.
+        // Inspect xterm's committed display, not the raw escape-code stream.
+        const buffer = term.buffer.active;
+        for (let row = 0; row < term.rows; row += 1) {
+          if (buffer.getLine(buffer.viewportY + row)?.translateToString(true).trim()) {
+            hasRenderedOutput = true;
+            setTerminalHasOutput(true);
+            break;
+          }
+        }
+      });
       noteResumePtyChunk(rendered);
     };
 
@@ -1900,6 +1930,8 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
               <ChatSidebar
                 channel={channel}
                 profile={scopedProfile}
+                terminalState={ptyState}
+                terminalHasOutput={terminalHasOutput}
                 onDashboardNewSessionRequest={startFreshDashboardChat}
                 onSessionTitleChange={handleSessionTitleChange}
               />
@@ -2109,6 +2141,8 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
               <ChatSidebar
                 channel={channel}
                 profile={scopedProfile}
+                terminalState={ptyState}
+                terminalHasOutput={terminalHasOutput}
                 onDashboardNewSessionRequest={startFreshDashboardChat}
                 onSessionTitleChange={handleSessionTitleChange}
               />
