@@ -1134,6 +1134,20 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     // are hoisted to ``let`` bindings the cleanup closes over.
     let unmounting = false;
     let hasRenderedOutput = false;
+    let socketStartedAt = 0;
+    let everOpened = false;
+    let firstOutput = false;
+    let locallyRequestedClose: "connecting-timeout" | "effect-cleanup" | null = null;
+    // Deliberately exclude connection identifiers, URLs and terminal contents.
+    const socketDiagnostics = () => JSON.stringify({
+      elapsedMs: Math.round(performance.now() - socketStartedAt),
+      everOpened,
+      firstOutput,
+      hasRenderedOutput,
+      locallyRequestedClose,
+      online: navigator.onLine,
+      visibility: document.visibilityState,
+    });
     // The implicit active-session fallback (no `?resume=` on the URL) only
     // becomes known once the server's control frame arrives (see
     // `ws.onmessage` below) — everything gated on "is this a resume replay"
@@ -1307,6 +1321,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       if (unmounting || ticketSuperseded) return;
       clearTicketTimer();
 
+      socketStartedAt = performance.now();
       const ws = new WebSocket(url);
       ws.binaryType = "arraybuffer";
       wsRef.current = ws;
@@ -1318,6 +1333,8 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       connectingTimerRef.current = setTimeout(() => {
         connectingTimerRef.current = null;
         if (wsRef.current === ws && ws.readyState === WebSocket.CONNECTING) {
+          locallyRequestedClose = "connecting-timeout";
+          console.warn(`[chat] PTY opening timed out ${socketDiagnostics()}`);
           try {
             ws.close();
           } catch {
@@ -1328,6 +1345,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
 
     ws.onopen = () => {
       if (unmounting) return;
+      everOpened = true;
       clearReconnectTimer();
       clearConnectingTimer();
       connectInFlightRef.current = false;
@@ -1432,6 +1450,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
           : decoder.decode(new Uint8Array(ev.data as ArrayBuffer), {
               stream: true,
             });
+      if (text.length > 0) firstOutput = true;
       // Gate hydration on the payload actually written to xterm. The
       // sanitizer can turn a nonempty erase-only / all-newline / partial-CSI
       // resume frame into "" (pty-resume-sanitizer.ts); keying off raw `text`
@@ -1469,7 +1488,12 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       clearKeepaliveTimer();
       // close() completes asynchronously. A replacement terminal may already
       // own the shared socket/timer refs when this retired connection closes.
-      if (unmounting) return;
+      if (unmounting) {
+        if (!ev.wasClean) {
+          console.debug(`[chat] Retired PTY socket closed code=${ev.code} ${socketDiagnostics()}`);
+        }
+        return;
+      }
       // Drain buffered sanitizer state. A buffered partial escape is dropped
       // (writing an unterminated CSI would wedge xterm's parser); a buffered
       // newline run is emitted collapsed.
@@ -1484,18 +1508,14 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       wsRef.current = null;
       connectInFlightRef.current = false;
       clearConnectingTimer();
-      // Surface the real cause to the browser console on every close so a
-      // "chat won't connect" report can be diagnosed without server access.
-      // The server sends a machine-parseable reason on every rejection (see
-      // pty_ws in web_server.py); echo it verbatim alongside the close code.
-      const why = ev.reason ? ` reason=${ev.reason}` : "";
-      console.warn(`[chat] PTY WebSocket closed code=${ev.code}${why}`);
+      // Correlate transport drops with local lifecycle decisions without
+      // recording a URL, arbitrary close-reason text or terminal contents.
+      console.warn(`[chat] PTY WebSocket closed code=${ev.code} ${socketDiagnostics()}`);
       if (ev.code === 4401 && maybeReloadForLoopbackWsAuthFailure(ev.code)) {
         return;
       }
       // Server-side rejections (stale token, host mismatch, no PTY endpoint,
-      // non-loopback client). `ev.reason` is a machine identifier — it went
-      // to the console above; the user gets a sentence and, where a reload
+      // non-loopback client). The user gets a sentence and, where a reload
       // fixes it, a Reload button.
       const rejection = ptyRejectionBanner(ev.code);
       if (rejection) {
@@ -1629,6 +1649,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     term.focus();
 
     return () => {
+      locallyRequestedClose = "effect-cleanup";
       unmounting = true;
       imageUploadDisposed = true;
       syncMetricsRef.current = null;

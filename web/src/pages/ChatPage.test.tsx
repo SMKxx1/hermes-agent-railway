@@ -7,6 +7,7 @@ import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  PTY_CONNECTING_TIMEOUT_MS,
   PTY_RECONNECT_MAX_ATTEMPTS,
   PTY_RECONNECT_MAX_MS,
   PTY_TICKET_TIMEOUT_MS,
@@ -155,6 +156,7 @@ vi.mock("@/lib/api", () => ({
 
 class FakeWebSocket {
   static instances: FakeWebSocket[] = [];
+  static CONNECTING = 0;
   static OPEN = 1;
 
   binaryType = "blob";
@@ -282,6 +284,68 @@ afterEach(async () => {
 });
 
 describe("ChatPage", () => {
+  it.each([false, true])("logs bounded transport evidence without connection secrets (opened=%s)", async opened => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const clock = vi.spyOn(performance, "now").mockReturnValue(100);
+    try {
+      apiMocks.buildWsUrl.mockResolvedValue("ws://localhost/api/pty?ticket=secret-ticket&attach=secret-attach&channel=secret-channel");
+      const { default: ChatPage } = await import("./ChatPage");
+      await render(<MemoryRouter initialEntries={["/chat"]}><ChatPage isActive /></MemoryRouter>);
+      const socket = FakeWebSocket.instances[0];
+      if (opened) {
+        await act(async () => socket.onopen?.());
+        await act(async () => socket.onmessage?.({ data: "secret-terminal-content" }));
+      }
+      clock.mockReturnValue(142);
+      await act(async () => socket.onclose?.({ code: 1006, reason: "secret-close-reason", wasClean: false }));
+      const message = String(warn.mock.calls.find(([text]) => String(text).includes("PTY WebSocket closed"))?.[0]);
+      expect(message).toContain('{"elapsedMs":');
+      expect(JSON.parse(message.slice(message.indexOf("{")))).toEqual({
+        elapsedMs: 42,
+        everOpened: opened,
+        firstOutput: opened,
+        hasRenderedOutput: opened,
+        locallyRequestedClose: null,
+        online: navigator.onLine,
+        visibility: document.visibilityState,
+      });
+      expect(message).not.toContain("secret-");
+      expect(message).not.toContain("ws://");
+    } finally {
+      warn.mockRestore();
+      clock.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("records an opening timeout even if closing the stalled socket emits no event", async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const clock = vi.spyOn(performance, "now").mockReturnValue(100);
+    try {
+      const { default: ChatPage } = await import("./ChatPage");
+      await render(<MemoryRouter initialEntries={["/chat"]}><ChatPage isActive /></MemoryRouter>);
+      const socket = FakeWebSocket.instances[0];
+      socket.readyState = FakeWebSocket.CONNECTING;
+      clock.mockReturnValue(100 + PTY_CONNECTING_TIMEOUT_MS);
+      await act(async () => vi.advanceTimersByTimeAsync(PTY_CONNECTING_TIMEOUT_MS));
+      expect(socket.readyState).toBe(3);
+      const message = String(warn.mock.calls.find(([text]) => String(text).includes("PTY opening timed out"))?.[0]);
+      expect(message).toContain('{"elapsedMs":');
+      expect(JSON.parse(message.slice(message.indexOf("{")))).toMatchObject({
+        elapsedMs: PTY_CONNECTING_TIMEOUT_MS,
+        everOpened: false,
+        firstOutput: false,
+        locallyRequestedClose: "connecting-timeout",
+      });
+    } finally {
+      warn.mockRestore();
+      clock.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps the replacement PTY attached when the retired socket closes after a model switch", async () => {
     type ServerSocket = {
       pause(): void;
